@@ -24,7 +24,18 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          test "$(tar -tJf craftos-blink-0.1.0-alpha.2.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.2
+          test "$(tar -tJf craftos-blink-0.1.0-alpha.3.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.3
+
+  minecraft-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Build loopback control mod
+        run: tools/minecraft-control-mod/gradlew -p tools/minecraft-control-mod build
 
   craftos-pc:
     runs-on: ubuntu-latest
