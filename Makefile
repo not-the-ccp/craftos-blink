@@ -22,7 +22,10 @@ check-differential:
 
 check:
 	./tests/build-fixtures.sh
+	mkdir -p build
+	$(LUA) tools/bundle.lua . build/test-craftos-blink.lua cli
 	$(LUA) tests/run.lua
+	$(LUA) tests/bundle-environment-test.lua
 
 compatibility:
 	$(LUA) tools/generate-compatibility.lua .

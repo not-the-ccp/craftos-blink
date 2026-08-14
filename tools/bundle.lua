@@ -11,10 +11,9 @@ for _, short in ipairs(modules) do
   local path = root .. "/src/craftos_blink/" .. short .. ".lua"
   local h = assert(io.open(path, "rb")); local source = h:read("*a"); h:close()
   out:write("preload[", string.format("%q", name), "] = assert(load(", string.format("%q", source),
-    ", ", string.format("%q", "@" .. name), "))\n")
+    ", ", string.format("%q", "@" .. name), ", 't', _ENV))\n")
 end
 out:write("preload['craftos_blink'] = function() return require('craftos_blink.init') end\n")
 if mode == "api" then out:write("return require('craftos_blink')\n")
 else out:write("return require('craftos_blink.cli').main(arg or {})\n") end
 out:close()
-
