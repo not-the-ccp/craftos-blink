@@ -1,0 +1,9 @@
+.cache/
+build/
+dist/
+rootfs/
+*.AppImage
+*.tar.xz
+*.sha256
+*.log
+

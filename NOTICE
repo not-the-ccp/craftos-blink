@@ -1,0 +1,11 @@
+CraftOS Blink is a clean, mechanical Lua port of the userspace portions of
+Blink. The pinned, unmodified upstream source is included as a Git submodule
+at vendor/blink and is used as the behavioral reference.
+
+Blink is Copyright 2022 Justine Alexandra Roberts Tunney and is distributed
+under the ISC License. See LICENSES/Blink-ISC.txt.
+
+CraftOS-PC is used only as a test environment and is not redistributed in
+this repository. It is Copyright (c) 2019-2025 JackMacWindows and contributors
+and is distributed under the MIT License by its authors.
+

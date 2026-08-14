@@ -1,0 +1,3 @@
+[submodule "vendor/blink"]
+	path = vendor/blink
+	url = https://github.com/jart/blink.git
