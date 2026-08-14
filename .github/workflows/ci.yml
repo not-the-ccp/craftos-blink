@@ -32,9 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install fixture tools
-        run: sudo apt-get update && sudo apt-get install -y lua5.2 xz-utils
+        run: sudo apt-get update && sudo apt-get install -y libpulse0 lua5.2 xz-utils
       - name: CraftOS-PC 2.8.3 headless smoke test
         env:
           GH_TOKEN: ${{ github.token }}
         run: make check-craftos-pc
-
