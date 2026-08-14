@@ -8,6 +8,9 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 
+if [ ! -f vendor/blink/config.mk ]; then
+  (cd vendor/blink && ./configure)
+fi
+
 make -C vendor/blink -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 make -C vendor/blink check
-
