@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "craftos_blink_control",
+  "version": "${version}",
+  "name": "CraftOS Blink Guide Control",
+  "description": "Loopback-only automation and screenshot bridge for the CraftOS Blink in-game guide.",
+  "authors": ["not-the-ccp"],
+  "contact": {
+    "sources": "https://github.com/not-the-ccp/craftos-blink"
+  },
+  "license": "ISC",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.craftosblink.control.CraftOsBlinkControl"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
+

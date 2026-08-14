@@ -6,4 +6,6 @@ rootfs/
 *.tar.xz
 *.sha256
 *.log
+tools/minecraft-control-mod/.gradle/
+tools/minecraft-control-mod/run/
 
