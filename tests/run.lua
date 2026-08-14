@@ -9,6 +9,9 @@ local tests = {
   "unit.flags_test",
   "unit.decoder_test",
   "unit.cpu_test",
+  "unit.vfs_test",
+  "unit.elf_test",
+  "e2e.hello_test",
 }
 
 for _, name in ipairs(tests) do

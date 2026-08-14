@@ -15,6 +15,7 @@ check-upstream:
 	./scripts/check-upstream.sh
 
 check:
+	./tests/build-fixtures.sh
 	$(LUA) tests/run.lua
 
 clean:
