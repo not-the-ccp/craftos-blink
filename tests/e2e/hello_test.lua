@@ -36,3 +36,21 @@ t.eq(table.concat(minish_output), table.concat({
   "minish$ Linux craftos 6.6.0-craftos-blink x86_64\n",
   "minish$ bye from x86-64\n",
 }), "interactive guest output")
+
+local original_fs, original_read = _G.fs, _G.read
+local cc_input = { "help", "exit" }
+local cc_input_index, cc_output = 0, {}
+_G.fs = {}
+_G.read = function()
+  cc_input_index = cc_input_index + 1
+  return cc_input[cc_input_index]
+end
+local cc_minish = blink.run({ root = ".", program = "/build/fixtures/minish",
+  stdout = function(data) cc_output[#cc_output + 1] = data end,
+  instruction_limit = 300 })
+_G.fs, _G.read = original_fs, original_read
+t.eq(cc_minish.exit_code, 0, "ComputerCraft terminal guest result")
+t.eq(table.concat(cc_output), table.concat({
+  "minish$ built-ins: echo TEXT, uname, help, exit\n",
+  "minish$ bye from x86-64\n",
+}), "ComputerCraft terminal guest output")

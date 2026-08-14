@@ -59,7 +59,14 @@ function M.new(memory, vfs, options)
     mmap_next = options.mmap_base or 0x71000000, seed = options.seed or 0x4b1d,
     trace = options.trace, fds = {}, next_fd = 3 }, M)
   local host_io = type(io) == "table" and io or {}
-  self.fds[0] = { kind = "stdio", handle = options.stdin or host_io.stdin, readable = true }
+  local stdin = options.stdin
+  if not stdin and type(fs) == "table" and type(read) == "function" then
+    stdin = function()
+      local line = read()
+      return line ~= nil and line .. "\n" or nil
+    end
+  end
+  self.fds[0] = { kind = "stdio", handle = stdin or host_io.stdin, readable = true }
   self.fds[1] = { kind = "stdio", handle = options.stdout or host_io.stdout, writable = true }
   self.fds[2] = { kind = "stdio", handle = options.stderr or host_io.stderr, writable = true }
   return self
