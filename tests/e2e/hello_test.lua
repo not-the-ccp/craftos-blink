@@ -16,3 +16,7 @@ t.eq(result.signal, nil)
 t.eq(result.instructions, 8)
 t.eq(result.syscalls, 2)
 
+local arithmetic = blink.run({ root = ".", program = "/build/fixtures/arithmetic",
+  instruction_limit = 100 })
+t.eq(arithmetic.exit_code, 42, "arithmetic guest result")
+

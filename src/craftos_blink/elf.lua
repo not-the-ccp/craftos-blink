@@ -122,6 +122,24 @@ function M.load(memory, vfs, path, options)
   options = options or {}
   local data, err = vfs:read_file(path)
   if not data then error({ class = "host_configuration", code = err, path = path }, 0) end
+  if data:sub(1, 2) == "#!" then
+    if (options.shebang_depth or 0) >= 4 then elf_error("shebang_recursion") end
+    local line = data:match("^#!([^\r\n]+)")
+    if not line then elf_error("bad_shebang") end
+    local interpreter, optional = line:match("^%s*(%S+)%s*(.-)%s*$")
+    if not interpreter then elf_error("bad_shebang") end
+    local old = options.argv or { path }
+    local argv = { interpreter }
+    if optional ~= "" then argv[#argv + 1] = optional end
+    argv[#argv + 1] = path
+    for i = 2, #old do argv[#argv + 1] = old[i] end
+    local nested = {}
+    for key, value in pairs(options) do nested[key] = value end
+    nested.argv, nested.shebang_depth = argv, (options.shebang_depth or 0) + 1
+    local result = M.load(memory, vfs, interpreter, nested)
+    result.script, result.script_interpreter = path, interpreter
+    return result
+  end
   local elf = M.parse(data)
   local base = elf.type == 3 and (options.base or 0x40000000) or 0
   local phdr = map_image(memory, data, elf, base)
@@ -155,4 +173,3 @@ function M.load(memory, vfs, path, options)
 end
 
 return M
-
