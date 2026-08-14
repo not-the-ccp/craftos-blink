@@ -1,5 +1,5 @@
 -- CraftOS Blink alpha installer for ComputerCraft/CraftOS.
-local version = "0.1.0-alpha.1"
+local version = "0.1.0-alpha.2"
 local base = "https://github.com/not-the-ccp/craftos-blink/releases/download/v" .. version .. "/"
 local target = (arg and arg[1]) or "craftos-blink"
 
@@ -29,4 +29,3 @@ write(fs.combine(target, "SHA256SUMS"), download("SHA256SUMS"))
 
 print("Installed CraftOS Blink " .. version .. " in /" .. target)
 print("Run: " .. fs.combine(target, "craftos-blink.lua") .. " --help")
-

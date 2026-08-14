@@ -24,7 +24,7 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          test "$(tar -tJf craftos-blink-0.1.0-alpha.1.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.1
+          test "$(tar -tJf craftos-blink-0.1.0-alpha.2.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.2
 
   craftos-pc:
     runs-on: ubuntu-latest
