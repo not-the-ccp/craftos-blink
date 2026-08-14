@@ -1,4 +1,4 @@
-.PHONY: all check check-craftos-pc check-upstream bootstrap craftos-pc clean
+.PHONY: all check check-craftos-pc check-upstream compatibility package bootstrap craftos-pc clean
 
 LUA ?= lua5.2
 
@@ -20,6 +20,12 @@ check-craftos-pc:
 check:
 	./tests/build-fixtures.sh
 	$(LUA) tests/run.lua
+
+compatibility:
+	$(LUA) tools/generate-compatibility.lua .
+
+package: check compatibility
+	./scripts/package.sh
 
 clean:
 	rm -rf build dist

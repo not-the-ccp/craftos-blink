@@ -12,6 +12,7 @@ local tests = {
   "unit.vfs_test",
   "unit.elf_test",
   "e2e.hello_test",
+  "unit.registry_test",
 }
 
 for _, name in ipairs(tests) do
