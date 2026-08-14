@@ -7,6 +7,8 @@ local tests = {
   "unit.u64_test",
   "unit.memory_test",
   "unit.flags_test",
+  "unit.decoder_test",
+  "unit.cpu_test",
 }
 
 for _, name in ipairs(tests) do
