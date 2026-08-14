@@ -3,27 +3,36 @@ package dev.craftosblink.control;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import com.mojang.blaze3d.platform.NativeImage;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
+import org.lwjgl.glfw.GLFW;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -32,16 +41,19 @@ import java.util.function.Supplier;
  */
 public final class CraftOsBlinkControl implements ClientModInitializer {
     private static final int PORT = Integer.getInteger("craftosBlink.controlPort", 8765);
+    private static final DateTimeFormatter SCREENSHOT_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH.mm.ss.SSS");
     private HttpServer server;
+    private volatile long lastClientPulse = System.nanoTime();
 
     @Override
     public void onInitializeClient() {
         try {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT), 0);
-            server.createContext("/health", exchange -> respond(exchange, 200, "{\"ok\":true}"));
+            server.createContext("/health", checked(this::health));
             server.createContext("/state", checked(this::state));
             server.createContext("/command", checked(this::command));
             server.createContext("/use", checked(this::use));
+            server.createContext("/input", checked(this::input));
             server.createContext("/screenshot", checked(this::screenshot));
             server.setExecutor(Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "craftos-blink-control");
@@ -49,11 +61,19 @@ public final class CraftOsBlinkControl implements ClientModInitializer {
                 return thread;
             }));
             server.start();
+            ClientTickEvents.END_CLIENT_TICK.register(client -> lastClientPulse = System.nanoTime());
             ClientLifecycleEvents.CLIENT_STOPPING.register(client -> server.stop(0));
             System.out.println("[CraftOS Blink Control] listening on http://127.0.0.1:" + PORT);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not bind CraftOS Blink control service", exception);
         }
+    }
+
+    private void health(HttpExchange exchange) throws Exception {
+        requireMethod(exchange, "GET");
+        long pulseAgeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastClientPulse);
+        respond(exchange, 200, "{\"ok\":true,\"client_pulse_age_ms\":" + pulseAgeMs
+            + ",\"client_responsive\":" + (pulseAgeMs < 2000) + "}");
     }
 
     private void state(HttpExchange exchange) throws Exception {
@@ -103,17 +123,40 @@ public final class CraftOsBlinkControl implements ClientModInitializer {
 
     private void screenshot(HttpExchange exchange) throws Exception {
         requireMethod(exchange, "POST");
-        String message = onClient(() -> {
+        NativeImage image = onClient(() -> Screenshot.takeScreenshot(Minecraft.getInstance().getMainRenderTarget()));
+        Path directory = Minecraft.getInstance().gameDirectory.toPath().resolve("screenshots");
+        Files.createDirectories(directory);
+        Path output = directory.resolve("craftos-blink-" + LocalDateTime.now().format(SCREENSHOT_TIME) + ".png");
+        try { image.writeToFile(output); }
+        finally { image.close(); }
+        respond(exchange, 200, "{\"saved\":true,\"path\":" + json(output.toString()) + "}");
+    }
+
+    private void input(HttpExchange exchange) throws Exception {
+        requireMethod(exchange, "POST");
+        String input = readBody(exchange);
+        Map<String, String> query = query(exchange.getRequestURI());
+        boolean clear = Boolean.parseBoolean(query.getOrDefault("clear", "false"));
+        boolean submit = Boolean.parseBoolean(query.getOrDefault("submit", "false"));
+        onClient(() -> {
             Minecraft client = Minecraft.getInstance();
-            CompletableFuture<String> saved = new CompletableFuture<>();
-            Screenshot.grab(client.gameDirectory, client.getMainRenderTarget(), component -> saved.complete(component.getString()));
-            try {
-                return saved.get(10, TimeUnit.SECONDS);
-            } catch (Exception exception) {
-                throw new IllegalStateException("Screenshot did not complete", exception);
+            Screen screen = client.screen;
+            if (screen == null) throw new IllegalStateException("No screen is open");
+            if (clear) {
+                for (int i = 0; i < 512; i++) {
+                    screen.keyPressed(GLFW.GLFW_KEY_BACKSPACE, 0, 0);
+                    screen.keyReleased(GLFW.GLFW_KEY_BACKSPACE, 0, 0);
+                }
             }
+            for (int i = 0; i < input.length(); i++) screen.charTyped(input.charAt(i), 0);
+            if (submit) {
+                screen.keyPressed(GLFW.GLFW_KEY_ENTER, 0, 0);
+                screen.keyReleased(GLFW.GLFW_KEY_ENTER, 0, 0);
+            }
+            return null;
         });
-        respond(exchange, 200, "{\"saved\":true,\"message\":" + json(message) + "}");
+        respond(exchange, 202, "{\"accepted\":true,\"characters\":" + input.length()
+            + ",\"cleared\":" + clear + ",\"submitted\":" + submit + "}");
     }
 
     private static <T> T onClient(Supplier<T> action) throws Exception {
@@ -123,14 +166,39 @@ public final class CraftOsBlinkControl implements ClientModInitializer {
             try { result.complete(action.get()); }
             catch (Throwable throwable) { result.completeExceptionally(throwable); }
         });
-        return result.get(10, TimeUnit.SECONDS);
+        try { return result.get(10, TimeUnit.SECONDS); }
+        catch (TimeoutException exception) {
+            dumpRenderThread();
+            throw new IllegalStateException("Minecraft render-thread task timed out after 10 seconds", exception);
+        }
+    }
+
+    private static void dumpRenderThread() {
+        for (Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+            Thread thread = entry.getKey();
+            if (!thread.getName().equals("Render thread")) continue;
+            System.err.println("[CraftOS Blink Control] Render thread state: " + thread.getState());
+            for (StackTraceElement frame : entry.getValue()) System.err.println("    at " + frame);
+        }
     }
 
     private static HttpHandler checked(ThrowingHandler handler) {
         return exchange -> {
-            try { handler.handle(exchange); }
-            catch (BadRequest exception) { respond(exchange, 400, "{\"error\":" + json(exception.getMessage()) + "}"); }
-            catch (Exception exception) { respond(exchange, 500, "{\"error\":" + json(exception.toString()) + "}"); }
+            long started = System.nanoTime();
+            String request = exchange.getRequestMethod() + " " + exchange.getRequestURI();
+            System.out.println("[CraftOS Blink Control] -> " + request);
+            try {
+                handler.handle(exchange);
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                System.out.println("[CraftOS Blink Control] <- " + request + " (" + elapsedMs + " ms)");
+            } catch (BadRequest exception) {
+                System.err.println("[CraftOS Blink Control] bad request " + request + ": " + exception.getMessage());
+                respond(exchange, 400, "{\"error\":" + json(exception.getMessage()) + "}");
+            } catch (Exception exception) {
+                System.err.println("[CraftOS Blink Control] failed " + request + ": " + exception);
+                exception.printStackTrace(System.err);
+                respond(exchange, 500, "{\"error\":" + json(exception.toString()) + "}");
+            }
         };
     }
 
