@@ -1,0 +1,31 @@
+local t = require("testlib")
+local u = require("craftos_blink.u64")
+
+local function hex(v) return u.hex(v) end
+local function eq(v, expected, message) t.eq(hex(v), expected, message) end
+
+eq(u.new(-1, -1), "ffffffffffffffff", "normalization")
+eq(u.from_number(9007199254740991), "001fffffffffffff", "largest exact number")
+t.eq(u.to_number(u.new(0xffffffff, 0x1fffff)), 9007199254740991)
+t.raises(function() u.to_number(u.new(0, 0x200000)) end)
+eq(u.add(u.new(0xffffffff, 0), u.one()), "0000000100000000", "add carry")
+eq(u.sub(u.zero(), u.one()), "ffffffffffffffff", "subtract wraps")
+eq(u.neg(u.new(1, 0)), "ffffffffffffffff", "negate")
+eq(u.shl(u.new(0x89abcdef, 0x01234567), 32), "89abcdef00000000", "shift left word")
+eq(u.shr(u.new(0x89abcdef, 0x01234567), 32), "0000000001234567", "shift right word")
+eq(u.sar(u.new(0, 0x80000000), 63), "ffffffffffffffff", "arithmetic shift")
+eq(u.rol(u.new(1, 0), 63), "8000000000000000", "rotate")
+eq(u.mul(u.new(0xffffffff, 0), u.new(0xffffffff, 0)), "fffffffe00000001", "multiply")
+eq(u.mul(u.new(0, 1), u.new(0, 1)), "0000000000000000", "multiply wraps")
+local q, r = u.divmod(u.new(0, 1), u.from_number(3))
+eq(q, "0000000055555555", "divide quotient")
+eq(r, "0000000000000001", "divide remainder")
+q, r = u.sdivmod(u.from_signed(-7), u.from_signed(3))
+t.eq(u.to_signed_number(q), -2)
+t.eq(u.to_signed_number(r), -1)
+eq(u.sign_extend(u.new(0x80, 0), 8), "ffffffffffffff80", "sign extend byte")
+eq(u.sign_extend(u.new(0x7fff, 0), 16), "0000000000007fff", "positive sign extend")
+local bytes = "\239\205\171\137\103\69\35\1"
+eq(u.from_le(bytes), "0123456789abcdef", "little endian decode")
+t.eq(u.to_le(u.new(0x89abcdef, 0x01234567)), bytes, "little endian encode")
+
