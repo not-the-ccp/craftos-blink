@@ -6,7 +6,7 @@ local Kernel = require("craftos_blink.kernel")
 local platform = require("craftos_blink.platform")
 local u64 = require("craftos_blink.u64")
 
-local M = { VERSION = "0.1.0-alpha.3" }
+local M = { VERSION = "0.1.0-alpha.4" }
 
 local profiles = {
   ["craftos-pc"] = { memory = 256 * 1024 * 1024, processes = 64, slice = 10000 },

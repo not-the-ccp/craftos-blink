@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-version=${VERSION:-0.1.0-alpha.3}
+version=${VERSION:-0.1.0-alpha.4}
 name=craftos-blink-$version
 stage=build/package/$name
 

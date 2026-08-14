@@ -1,7 +1,8 @@
 -- CraftOS Blink alpha installer for ComputerCraft/CraftOS.
-local version = "0.1.0-alpha.3"
+local version = "0.1.0-alpha.4"
 local base = "https://github.com/not-the-ccp/craftos-blink/releases/download/v" .. version .. "/"
-local target = (arg and arg[1]) or "craftos-blink"
+local requested_target = ...
+local target = requested_target or "craftos-blink"
 
 if type(fs) ~= "table" or type(http) ~= "table" then
   error("install.lua must run under ComputerCraft with the HTTP API enabled", 0)
