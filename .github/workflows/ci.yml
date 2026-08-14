@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lua52:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install Lua 5.2
+        run: sudo apt-get update && sudo apt-get install -y lua5.2 xz-utils
+      - name: Unit and ELF tests
+        run: make check
+      - name: Build standalone release assets
+        run: make package
+      - name: Verify checksums and archive layout
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          test "$(tar -tJf craftos-blink-0.1.0-alpha.1.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.1
+
+  craftos-pc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fixture tools
+        run: sudo apt-get update && sudo apt-get install -y lua5.2 xz-utils
+      - name: CraftOS-PC 2.8.3 headless smoke test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make check-craftos-pc
+
