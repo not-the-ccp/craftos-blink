@@ -1,5 +1,5 @@
 -- CraftOS Blink alpha installer for ComputerCraft/CraftOS.
-local version = "0.1.0-alpha.5"
+local version = "0.1.0-alpha.6"
 local base = "https://github.com/not-the-ccp/craftos-blink/releases/download/v" .. version .. "/"
 local requested_target = ...
 local target = requested_target or "craftos-blink"
