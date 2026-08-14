@@ -1,4 +1,4 @@
-.PHONY: all check check-upstream bootstrap craftos-pc clean
+.PHONY: all check check-craftos-pc check-upstream bootstrap craftos-pc clean
 
 LUA ?= lua5.2
 
@@ -13,6 +13,9 @@ craftos-pc:
 
 check-upstream:
 	./scripts/check-upstream.sh
+
+check-craftos-pc:
+	./scripts/check-craftos-pc.sh
 
 check:
 	./tests/build-fixtures.sh
