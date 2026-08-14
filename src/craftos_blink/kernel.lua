@@ -14,11 +14,42 @@ end
 local function number(cpu, reg) return u64.to_number(cpu.regs[reg]) end
 
 local function write_handle(handle, data)
-  if type(handle) == "table" and handle.write then
+  if (type(handle) == "table" or type(handle) == "userdata") and handle.write then
     local ok = pcall(handle.write, data)
     if not ok then handle:write(data) end
   elseif type(handle) == "function" then handle(data)
-  else io.write(data) end
+  elseif type(write) == "function" then write(data)
+  elseif type(io) == "table" and io.write then io.write(data)
+  else error("no host output handle", 0) end
+end
+
+local function read_handle(fd, count)
+  if count <= 0 then return "" end
+  if fd.pending and #fd.pending > 0 then
+    local data = fd.pending:sub(1, count)
+    fd.pending = fd.pending:sub(#data + 1)
+    return data
+  end
+
+  local handle, data = fd.handle
+  if (type(handle) == "table" or type(handle) == "userdata") and handle.read then
+    local ok
+    ok, data = pcall(handle.read, count)
+    if not ok then ok, data = pcall(handle.read, handle, count) end
+    if not ok then error(data, 0) end
+  elseif type(handle) == "function" then
+    data = handle(count)
+  elseif type(read) == "function" then
+    local line = read()
+    if line ~= nil then data = line .. "\n" end
+  end
+
+  if not data then return "" end
+  if #data > count then
+    fd.pending = data:sub(count + 1)
+    data = data:sub(1, count)
+  end
+  return data
 end
 
 function M.new(memory, vfs, options)
@@ -27,9 +58,10 @@ function M.new(memory, vfs, options)
     exited = false, exit_code = nil, brk = options.brk or 0x70000000,
     mmap_next = options.mmap_base or 0x71000000, seed = options.seed or 0x4b1d,
     trace = options.trace, fds = {}, next_fd = 3 }, M)
-  self.fds[0] = { kind = "stdio", handle = options.stdin or io.stdin, readable = true }
-  self.fds[1] = { kind = "stdio", handle = options.stdout or io.stdout, writable = true }
-  self.fds[2] = { kind = "stdio", handle = options.stderr or io.stderr, writable = true }
+  local host_io = type(io) == "table" and io or {}
+  self.fds[0] = { kind = "stdio", handle = options.stdin or host_io.stdin, readable = true }
+  self.fds[1] = { kind = "stdio", handle = options.stdout or host_io.stdout, writable = true }
+  self.fds[2] = { kind = "stdio", handle = options.stderr or host_io.stderr, writable = true }
   return self
 end
 
@@ -84,7 +116,10 @@ function M:dispatch(cpu)
     elseif fd.kind == "file" then
       local data = fd.data:sub(fd.pos, fd.pos + a3 - 1); fd.pos = fd.pos + #data
       self.memory:write(a2, data); result(cpu, #data)
-    else result(cpu, 0) end
+    else
+      local data = read_handle(fd, a3)
+      self.memory:write(a2, data); result(cpu, #data)
+    end
   elseif nr == 2 or nr == 257 then
     local path_address, flags_value = nr == 2 and a1 or a2, nr == 2 and a2 or a3
     local path = self:cstring(path_address)
