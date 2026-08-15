@@ -33,50 +33,94 @@ function M.run(config)
   local instruction_trace = config.trace_instruction
   local syscall_trace = config.trace_syscall
   local kernel = Kernel.new(memory, vfs, { stdin = config.stdin, stdout = config.stdout,
-    stderr = config.stderr, seed = config.seed, trace = syscall_trace })
+    stderr = config.stderr, seed = config.seed, trace = syscall_trace,
+    instruction_trace = instruction_trace, max_processes = profile.processes })
   local loaded = ELF.load(memory, vfs, config.program, { argv = config.argv or { config.program },
     env = environment_list(config.environment or {}), base = config.base, stack_size = config.stack_size })
   local cpu
-  cpu = CPU.new(memory, { rip = loaded.entry, trace = instruction_trace,
-    syscall = function(c) kernel:dispatch(c) end })
+  cpu = CPU.new(memory, { rip = loaded.entry,
+    trace = instruction_trace and function(event) kernel:emit_instruction(event) end or nil,
+    syscall = function(c, next_rip) return kernel:dispatch(c, next_rip) end })
   cpu:set_reg(4, u64.from_number(loaded.stack), 64)
-  vfs.maps_text = function()
-    local out = {}
-    for _, map in ipairs(memory:mappings()) do
-      out[#out + 1] = string.format("%012x-%012x %s%s%sp 00000000 00:00 0\n", map.address,
-        map.address + Memory.PAGE_SIZE, bit32.band(map.prot, 1) ~= 0 and "r" or "-",
-        bit32.band(map.prot, 2) ~= 0 and "w" or "-", bit32.band(map.prot, 4) ~= 0 and "x" or "-")
-    end
-    return table.concat(out)
-  end
+  kernel:attach_cpu(cpu)
+  kernel:update_proc_state()
 
   local started = platform.now_ms()
   local slice_started, slice_count = started, 0
   local instruction_limit = config.instruction_limit or math.huge
+  local instructions, root_fault = 0, nil
+  local signal_numbers = { SIGHUP = 1, SIGINT = 2, SIGILL = 4, SIGABRT = 6, SIGFPE = 8,
+    SIGKILL = 9, SIGSEGV = 11, SIGPIPE = 13, SIGTERM = 15 }
+  local function add_fault_context(value, process)
+    if type(value) ~= "table" or not process or not process.cpu then return end
+    value.pid, value.rip = process.pid, process.cpu.rip
+    if config.debug_faults then
+      value.rflags = process.cpu.rflags
+      value.registers = {}
+      for index, name in ipairs(CPU.register_names) do
+        value.registers[name] = u64.hex(process.cpu.regs[index - 1])
+      end
+      value.processes = {}
+      for pid, item in pairs(kernel.world.processes) do
+        value.processes[#value.processes + 1] = { pid = pid, ppid = item.ppid, state = item.state,
+          rip = item.cpu and item.cpu.rip or nil }
+      end
+      table.sort(value.processes, function(a, b) return a.pid < b.pid end)
+    end
+  end
   local ok, fault = pcall(function()
-    while not cpu.halted and cpu.instructions < instruction_limit do
-      cpu:step(); slice_count = slice_count + 1
-      local now = platform.now_ms()
-      if slice_count >= (config.slice_instructions or profile.slice) or now - slice_started >= 50 then
-        local terminated = config.yield and config.yield() or platform.cooperative_yield()
-        if terminated == "terminate" then
-          error({ class = "guest_fault", signal = "SIGTERM", code = "SI_USER", address = cpu.rip }, 0)
+    while kernel.state ~= "exited" and instructions < instruction_limit do
+      local runnable = {}
+      for pid, process in pairs(kernel.world.processes) do
+        if process.state == "runnable" and process.cpu and not process.cpu.halted then
+          runnable[#runnable + 1] = pid
         end
-        slice_count, slice_started = 0, platform.now_ms()
+      end
+      table.sort(runnable)
+      if #runnable == 0 then error({ class = "resource_limit", resource = "scheduler_deadlock" }, 0) end
+      for _, pid in ipairs(runnable) do
+        if kernel.state == "exited" or instructions >= instruction_limit then break end
+        local process = kernel.world.processes[pid]
+        if process and process.state == "runnable" and not process.cpu.halted then
+          local step_ok, step_fault = pcall(process.cpu.step, process.cpu)
+          instructions, slice_count = instructions + 1, slice_count + 1
+          if not step_ok then
+            if type(step_fault) ~= "table" or step_fault.class ~= "guest_fault" then error(step_fault, 0) end
+            add_fault_context(step_fault, process)
+            process:exit_process(128 + (signal_numbers[step_fault.signal] or 0),
+              signal_numbers[step_fault.signal] or 0)
+            if process == kernel then root_fault = step_fault end
+          end
+          local now = platform.now_ms()
+          if slice_count >= (config.slice_instructions or profile.slice) or now - slice_started >= 50 then
+            local terminated = config.yield and config.yield() or platform.cooperative_yield()
+            if terminated == "terminate" then
+              root_fault = { class = "guest_fault", signal = "SIGTERM", code = "SI_USER",
+                address = kernel.cpu.rip }
+              kernel:exit_process(143, 15)
+            end
+            slice_count, slice_started = 0, platform.now_ms()
+          end
+        end
       end
     end
-    if not cpu.halted then error({ class = "resource_limit", resource = "instructions" }, 0) end
+    if kernel.state ~= "exited" then error({ class = "resource_limit", resource = "instructions" }, 0) end
   end)
   local elapsed = math.floor(platform.now_ms() - started)
   if not ok then
+    add_fault_context(fault, kernel)
     if type(fault) == "table" and fault.class == "guest_fault" then
       return { exit_code = nil, signal = fault.signal, fault = fault, instructions = cpu.instructions,
         syscalls = kernel.syscalls, elapsed_ms = elapsed }
     end
     error(fault, 0)
   end
-  return { exit_code = kernel.exit_code or 0, signal = nil, instructions = cpu.instructions,
-    syscalls = kernel.syscalls, elapsed_ms = elapsed }
+  if root_fault then
+    return { exit_code = nil, signal = root_fault.signal, fault = root_fault, instructions = instructions,
+      syscalls = kernel.world.syscalls, elapsed_ms = elapsed }
+  end
+  return { exit_code = kernel.exit_code or 0, signal = nil, instructions = instructions,
+    syscalls = kernel.world.syscalls, elapsed_ms = elapsed }
 end
 
 M.profiles = profiles

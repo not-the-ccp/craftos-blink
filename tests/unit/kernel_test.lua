@@ -204,3 +204,94 @@ t.eq(fs_memory:read(0x73000a00, 8), string.rep("\0", 8), "/dev/zero bytes")
 local dev_null = guest_string("/dev/null")
 local null_fd = syscall(2, dev_null, 1, 0)
 t.eq(syscall(1, null_fd, 0x73000400, 5), 5, "/dev/null discards writes")
+
+local fault_read_fd = syscall(2, existing, 0, 0)
+t.eq(syscall(0, fault_read_fd, 0x74000000, 2), -14, "read invalid buffer returns EFAULT")
+t.eq(syscall(0, fault_read_fd, 0x73000e00, 3), 3, "EFAULT read does not advance offset")
+t.eq(fs_memory:read(0x73000e00, 3), "abc", "read after EFAULT starts at original offset")
+local fault_path = guest_string("/faultfile")
+local fault_write_fd = syscall(2, fault_path, 0x42, 420)
+t.eq(syscall(1, fault_write_fd, 0x74000000, 2), -14, "write invalid buffer returns EFAULT")
+t.eq(files["root/faultfile"], "", "EFAULT write has no filesystem effect")
+t.eq(syscall(2, guest_string("../../escape"), 0, 0), -13, "sandbox escape returns EACCES")
+
+local trace_events = {}
+fs_kernel.trace = function(event) trace_events[#trace_events + 1] = event end
+t.eq(syscall(39), 1, "traced getpid")
+t.eq(trace_events[1].phase, "enter", "syscall trace enter phase")
+t.eq(trace_events[1].pid, 1, "syscall trace pid")
+t.eq(trace_events[1].number, 39, "syscall trace number")
+t.eq(trace_events[2].phase, "exit", "syscall trace exit phase")
+t.eq(trace_events[2].result, 1, "syscall trace result")
+fs_kernel.trace = nil
+
+-- Process objects share open-file descriptions and pipes while keeping COW
+-- memory and wait state distinct. Drive the handlers at syscall return RIPs so
+-- a forked child cannot accidentally re-execute the fork instruction.
+fs_kernel:attach_cpu(fs_cpu)
+fs_kernel:update_proc_state()
+local function set_process_syscall(process, nr, arguments)
+  process.cpu:set_reg(0, u64.from_number(nr), 64)
+  arguments = arguments or {}
+  for index, reg in ipairs(arg_registers) do
+    local value = arguments[index] or 0
+    process.cpu:set_reg(reg, value < 0 and u64.from_signed(value) or u64.from_number(value), 64)
+  end
+end
+local function process_result(process)
+  return process.cpu.regs[0][2] >= 0xffe00000 and u64.to_signed_number(process.cpu.regs[0])
+    or u64.to_number(process.cpu.regs[0])
+end
+
+set_process_syscall(fs_kernel, 22, { 0x73000c00 })
+fs_kernel:dispatch(fs_cpu, 0x2000)
+t.eq(process_result(fs_kernel), 0, "pipe syscall")
+local pipe_read, pipe_write = fs_memory:read_u32(0x73000c00), fs_memory:read_u32(0x73000c04)
+t.truthy(pipe_read ~= pipe_write, "pipe returns distinct descriptors")
+set_process_syscall(fs_kernel, 0, { pipe_read, 0x73000c20, 0 })
+fs_kernel:dispatch(fs_cpu, 0x2001)
+t.eq(process_result(fs_kernel), 0, "zero-length pipe read never blocks")
+
+fs_memory:write8(0x73000d00, 0x11)
+set_process_syscall(fs_kernel, 57)
+fs_kernel:dispatch(fs_cpu, 0x123456)
+local child_pid = process_result(fs_kernel)
+local child = fs_kernel.world.processes[child_pid]
+t.truthy(child ~= nil, "fork registers child process")
+t.eq(child.ppid, fs_kernel.pid, "fork child parent pid")
+t.eq(child.cpu.rip, 0x123456, "fork child resumes after syscall")
+t.eq(process_result(child), 0, "fork child result is zero")
+child.memory:write8(0x73000d00, 0x22)
+t.eq(fs_memory:read8(0x73000d00), 0x11, "fork memory is copy-on-write")
+t.eq(child.memory:read8(0x73000d00), 0x22, "child sees private COW write")
+t.eq(child.fds[pipe_read].description, fs_kernel.fds[pipe_read].description,
+  "fork shares open-file descriptions")
+
+set_process_syscall(child, 0, { pipe_read, 0x73000d10, 4 })
+child:dispatch(child.cpu, 0x123458)
+t.eq(child.state, "blocked", "empty pipe read blocks child")
+fs_memory:write(0x73000d20, "pipe")
+set_process_syscall(fs_kernel, 1, { pipe_write, 0x73000d20, 4 })
+fs_kernel:dispatch(fs_cpu, 0x2002)
+t.eq(child.state, "runnable", "pipe write wakes reader")
+t.eq(process_result(child), 4, "woken pipe read result")
+t.eq(child.memory:read(0x73000d10, 4), "pipe", "pipe transfers bytes")
+
+child:exit_process(7)
+set_process_syscall(fs_kernel, 61, { child_pid, 0x73000d40, 0, 0 })
+fs_kernel:dispatch(fs_cpu, 0x2004)
+t.eq(process_result(fs_kernel), child_pid, "wait4 reaps exited child")
+t.eq(fs_memory:read_u32(0x73000d40), 7 * 256, "wait4 encodes exit status")
+t.eq(fs_kernel.world.processes[child_pid], nil, "wait4 removes zombie")
+
+set_process_syscall(fs_kernel, 57)
+fs_kernel:dispatch(fs_cpu, 0x223344)
+local waiting_pid = process_result(fs_kernel)
+local waiting_child = fs_kernel.world.processes[waiting_pid]
+set_process_syscall(fs_kernel, 61, { waiting_pid, 0x73000d50, 0, 0 })
+fs_kernel:dispatch(fs_cpu, 0x2006)
+t.eq(fs_kernel.state, "blocked", "wait4 blocks while child runs")
+waiting_child:exit_process(3)
+t.eq(fs_kernel.state, "runnable", "child exit wakes waiting parent")
+t.eq(process_result(fs_kernel), waiting_pid, "blocked wait4 receives child pid")
+t.eq(fs_memory:read_u32(0x73000d50), 3 * 256, "blocked wait4 status")

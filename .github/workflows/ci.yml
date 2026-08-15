@@ -2,13 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 jobs:
   lua52:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +30,7 @@ jobs:
           test "$(tar -tJf craftos-blink-0.1.0-alpha.6.tar.xz | cut -d/ -f1 | sort -u)" = craftos-blink-0.1.0-alpha.6
 
   minecraft-control:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +42,7 @@ jobs:
         run: tools/minecraft-control-mod/gradlew -p tools/minecraft-control-mod build
 
   craftos-pc:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
