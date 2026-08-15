@@ -9,7 +9,7 @@ local function split(path)
 end
 
 function M.normalize(path, cwd)
-  assert(type(path) == "string" and not path:find("%z"), "invalid guest path")
+  assert(type(path) == "string" and not path:find("[%z\r\n]"), "invalid guest path")
   local parts = {}
   if path:sub(1, 1) ~= "/" then
     for _, part in ipairs(split(cwd or "/")) do parts[#parts + 1] = part end
@@ -47,26 +47,63 @@ local function cc_adapter()
   }
 end
 
-local function posix_adapter()
+local function shell_quote(value)
+  return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function command_line(command)
+  local handle = io.popen(command, "r")
+  if not handle then return nil end
+  local value = handle:read("*l")
+  local ok = handle:close()
+  return ok and value or nil
+end
+
+local function posix_adapter(root)
+  local canonical_root = command_line("realpath -m -- " .. shell_quote(root))
+  assert(canonical_root, "realpath is required by the POSIX sandbox adapter")
+  local function resolve(path, allow_missing)
+    local option = allow_missing and "-m" or "-e"
+    local canonical = command_line("realpath " .. option .. " -- " .. shell_quote(path))
+    if not canonical then return nil, "ENOENT" end
+    if canonical_root ~= "/" and canonical ~= canonical_root
+        and canonical:sub(1, #canonical_root + 1) ~= canonical_root .. "/" then
+      return nil, "EACCES"
+    end
+    return canonical
+  end
   return {
     read = function(path)
-      local h = io.open(path, "rb")
+      local safe, err = resolve(path, false)
+      if not safe then return nil, err end
+      local h = io.open(safe, "rb")
       if not h then return nil, "ENOENT" end
       local data = h:read("*a"); h:close(); return data
     end,
     write = function(path, data)
-      local h = io.open(path, "wb")
+      local safe, err = resolve(path, true)
+      if not safe then return nil, err end
+      local h = io.open(safe, "wb")
       if not h then return nil, "EACCES" end
       h:write(data); h:close(); return true
     end,
-    exists = function(path) local h = io.open(path, "rb"); if h then h:close(); return true end; return false end,
+    exists = function(path)
+      local safe = resolve(path, false)
+      if not safe then return false end
+      local h = io.open(safe, "rb"); if h then h:close(); return true end; return false
+    end,
+    is_dir = function(path)
+      local safe = resolve(path, false)
+      if not safe then return false end
+      return command_line("test -d " .. shell_quote(safe) .. " && printf yes") == "yes"
+    end,
     combine = function(a, b) return a:gsub("/$", "") .. "/" .. b:gsub("^/", "") end,
   }
 end
 
 function M.new(options)
   options = options or {}
-  local adapter = options.adapter or (type(fs) == "table" and fs.open and cc_adapter() or posix_adapter())
+  local adapter = options.adapter or (type(fs) == "table" and fs.open and cc_adapter() or posix_adapter(options.root or "."))
   return setmetatable({ root = options.root or ".", cwd = M.normalize(options.cwd or "/"),
     adapter = adapter, metadata = {}, virtual = {} }, M)
 end
@@ -116,4 +153,3 @@ function M:install_virtual_nodes(pid)
 end
 
 return M
-

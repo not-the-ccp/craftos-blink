@@ -5,7 +5,7 @@ local M = {}
 M.__index = M
 
 local errno = { EPERM = 1, ENOENT = 2, EBADF = 9, EAGAIN = 11, EACCES = 13,
-  EFAULT = 14, EINVAL = 22, ENOSYS = 38, EAFNOSUPPORT = 97, ENETDOWN = 100 }
+  EFAULT = 14, EINVAL = 22, ENOTTY = 25, ENOSYS = 38, EAFNOSUPPORT = 97, ENETDOWN = 100 }
 
 local function result(cpu, value)
   cpu:set_reg(0, value < 0 and u64.from_signed(value) or u64.from_number(value), 64)
@@ -15,8 +15,14 @@ local function number(cpu, reg)
   local value = cpu.regs[reg]
   if value[2] < 0x00200000 then return u64.to_number(value) end
   if value[2] >= 0xffe00000 then return u64.to_signed_number(value) end
-  error("non-canonical syscall argument in register " .. tostring(reg), 0)
+  error({ class = "guest_fault", signal = "SIGSEGV", code = "SEGV_MAPERR", address = cpu.rip }, 0)
 end
+
+local syscall_argc = {
+  [0] = 3, [1] = 3, [2] = 3, [3] = 1, [8] = 3, [9] = 6, [10] = 3, [11] = 2, [12] = 1,
+  [13] = 4, [14] = 4, [16] = 3, [41] = 3, [60] = 1, [63] = 1, [72] = 3, [79] = 2,
+  [158] = 2, [218] = 1, [228] = 2, [231] = 1, [257] = 4, [273] = 2, [318] = 3,
+}
 
 local function write_handle(handle, data)
   if (type(handle) == "table" or type(handle) == "userdata") and handle.write then
@@ -62,7 +68,7 @@ function M.new(memory, vfs, options)
   local self = setmetatable({ memory = memory, vfs = vfs, pid = 1, syscalls = 0,
     exited = false, exit_code = nil, brk = options.brk or 0x70000000,
     mmap_next = options.mmap_base or 0x71000000, seed = options.seed or 0x4b1d,
-    trace = options.trace, fds = {}, next_fd = 3 }, M)
+    trace = options.trace, fds = {}, next_fd = 3, signal_actions = {}, signal_mask = u64.zero() }, M)
   local host_io = type(io) == "table" and io or {}
   local stdin = options.stdin
   if not stdin and type(fs) == "table" and type(read) == "function" then
@@ -105,11 +111,9 @@ end
 
 function M:dispatch(cpu)
   local nr = cpu.regs[0][1]
-  local a1, a2, a3, a4, a5, a6 = 0, 0, 0, 0, 0, 0
-  if nr ~= 39 and nr ~= 110 and nr ~= 186 then
-    a1, a2, a3, a4, a5, a6 = number(cpu, 7), number(cpu, 6), number(cpu, 2),
-      number(cpu, 10), number(cpu, 8), number(cpu, 9)
-  end
+  local register_order, args = { 7, 6, 2, 10, 8, 9 }, { 0, 0, 0, 0, 0, 0 }
+  for i = 1, syscall_argc[nr] or 0 do args[i] = number(cpu, register_order[i]) end
+  local a1, a2, a3, a4, a5, a6 = args[1], args[2], args[3], args[4], args[5], args[6]
   self.syscalls = self.syscalls + 1
   if self.trace then self.trace({ number = nr, args = { a1, a2, a3, a4, a5, a6 } }) end
 
@@ -193,14 +197,55 @@ function M:dispatch(cpu)
     elseif a1 == 0x1003 then self.memory:write_u64(a2, u64.from_number(cpu.fs_base)); result(cpu, 0)
     elseif a1 == 0x1004 then self.memory:write_u64(a2, u64.from_number(cpu.gs_base)); result(cpu, 0)
     else result(cpu, -errno.EINVAL) end
-  elseif nr == 218 or nr == 273 then result(cpu, self.pid)
+  elseif nr == 13 then
+    if a1 < 1 or a1 > 64 or a4 ~= 8 or (a2 ~= 0 and (a1 == 9 or a1 == 19)) then
+      result(cpu, -errno.EINVAL)
+    else
+      local previous = self.signal_actions[a1] or { u64.zero(), u64.zero(), u64.zero(), u64.zero() }
+      if a3 ~= 0 then
+        for i = 1, 4 do self.memory:write_u64(a3 + (i - 1) * 8, previous[i]) end
+      end
+      if a2 ~= 0 then
+        self.signal_actions[a1] = { self.memory:read_u64(a2), self.memory:read_u64(a2 + 8),
+          self.memory:read_u64(a2 + 16), self.memory:read_u64(a2 + 24) }
+      end
+      result(cpu, 0)
+    end
+  elseif nr == 14 then
+    if a4 ~= 8 or a1 < 0 or a1 > 2 then result(cpu, -errno.EINVAL)
+    else
+      if a3 ~= 0 then self.memory:write_u64(a3, self.signal_mask) end
+      if a2 ~= 0 then
+        local requested = self.memory:read_u64(a2)
+        if a1 == 0 then self.signal_mask = u64.bor(self.signal_mask, requested)
+        elseif a1 == 1 then self.signal_mask = u64.band(self.signal_mask, u64.bnot(requested))
+        else self.signal_mask = requested end
+        local unblockable = u64.bor(u64.shl(u64.one(), 8), u64.shl(u64.one(), 18))
+        self.signal_mask = u64.band(self.signal_mask, u64.bnot(unblockable))
+      end
+      result(cpu, 0)
+    end
+  elseif nr == 16 then
+    local fd = self.fds[a1]
+    if not fd then result(cpu, -errno.EBADF)
+    elseif a2 == 0x5401 then -- TCGETS
+      self.memory:write(a3, string.rep("\0", 44)); result(cpu, 0)
+    elseif a2 == 0x5413 then -- TIOCGWINSZ
+      local width, height = 51, 19
+      if type(term) == "table" and type(term.getSize) == "function" then width, height = term.getSize() end
+      self.memory:write_u16(a3, height); self.memory:write_u16(a3 + 2, width)
+      self.memory:write_u16(a3 + 4, 0); self.memory:write_u16(a3 + 6, 0); result(cpu, 0)
+    elseif a2 == 0x5414 then result(cpu, 0) -- TIOCSWINSZ
+    else result(cpu, -errno.ENOTTY) end
+  elseif nr == 218 then result(cpu, self.pid)
+  elseif nr == 273 then result(cpu, 0)
   elseif nr == 228 then
     local ms = type(os.epoch) == "function" and os.epoch("utc") or math.floor(os.time() * 1000)
     local sec = math.floor(ms / 1000); self.memory:write_u64(a2, u64.from_number(sec)); self.memory:write_u64(a2 + 8, u64.from_number((ms % 1000) * 1000000)); result(cpu, 0)
   elseif nr == 318 then
     for i = 0, a2 - 1 do self.memory:write8(a1 + i, self:random_byte()) end; result(cpu, a2)
   elseif nr == 41 then result(cpu, a1 == 1 and -errno.ENOSYS or -errno.EAFNOSUPPORT)
-  elseif nr == 13 or nr == 14 or nr == 16 or nr == 72 then result(cpu, 0)
+  elseif nr == 72 then result(cpu, -errno.ENOSYS)
   else result(cpu, -errno.ENOSYS) end
 end
 

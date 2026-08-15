@@ -5,11 +5,11 @@ local seen_instructions, seen_syscalls = {}, {}
 for _, item in ipairs(registry.instructions) do
   t.truthy(not seen_instructions[item.name], "duplicate instruction " .. item.name)
   seen_instructions[item.name] = true
-  t.truthy(item.status == "implemented" or item.status == "planned" or item.status == "fault")
+  t.truthy(item.status == "implemented" or item.status == "planned" or item.status == "fault"
+    or item.status == "state-only" or item.status == "terminal-subset")
 end
 for _, item in ipairs(registry.syscalls) do
   local key = tostring(item.number)
   t.truthy(not seen_syscalls[key], "duplicate syscall " .. key)
   seen_syscalls[key] = true
 end
-
