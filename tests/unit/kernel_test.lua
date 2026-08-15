@@ -205,6 +205,16 @@ local dev_null = guest_string("/dev/null")
 local null_fd = syscall(2, dev_null, 1, 0)
 t.eq(syscall(1, null_fd, 0x73000400, 5), 5, "/dev/null discards writes")
 
+local fault_read_fd = syscall(2, existing, 0, 0)
+t.eq(syscall(0, fault_read_fd, 0x74000000, 2), -14, "read invalid buffer returns EFAULT")
+t.eq(syscall(0, fault_read_fd, 0x73000e00, 3), 3, "EFAULT read does not advance offset")
+t.eq(fs_memory:read(0x73000e00, 3), "abc", "read after EFAULT starts at original offset")
+local fault_path = guest_string("/faultfile")
+local fault_write_fd = syscall(2, fault_path, 0x42, 420)
+t.eq(syscall(1, fault_write_fd, 0x74000000, 2), -14, "write invalid buffer returns EFAULT")
+t.eq(files["root/faultfile"], "", "EFAULT write has no filesystem effect")
+t.eq(syscall(2, guest_string("../../escape"), 0, 0), -13, "sandbox escape returns EACCES")
+
 -- Process objects share open-file descriptions and pipes while keeping COW
 -- memory and wait state distinct. Drive the handlers at syscall return RIPs so
 -- a forked child cannot accidentally re-execute the fork instruction.
@@ -228,6 +238,9 @@ fs_kernel:dispatch(fs_cpu, 0x2000)
 t.eq(process_result(fs_kernel), 0, "pipe syscall")
 local pipe_read, pipe_write = fs_memory:read_u32(0x73000c00), fs_memory:read_u32(0x73000c04)
 t.truthy(pipe_read ~= pipe_write, "pipe returns distinct descriptors")
+set_process_syscall(fs_kernel, 0, { pipe_read, 0x73000c20, 0 })
+fs_kernel:dispatch(fs_cpu, 0x2001)
+t.eq(process_result(fs_kernel), 0, "zero-length pipe read never blocks")
 
 fs_memory:write8(0x73000d00, 0x11)
 set_process_syscall(fs_kernel, 57)

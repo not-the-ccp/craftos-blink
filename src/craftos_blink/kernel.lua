@@ -121,6 +121,17 @@ function M:cstring(address, limit)
   return nil
 end
 
+function M:validate_range(address, length, permission, access)
+  if length == 0 then return true end
+  local finish = address + length - 1
+  local current = address
+  while current <= finish do
+    self.memory:_page(current, permission, access)
+    current = (math.floor(current / Memory.PAGE_SIZE) + 1) * Memory.PAGE_SIZE
+  end
+  return true
+end
+
 function M:random_byte()
   local x = self.seed
   x = bit32.bxor(x, bit32.lshift(x, 13)); x = bit32.bxor(x, bit32.rshift(x, 17)); x = bit32.bxor(x, bit32.lshift(x, 5))
@@ -247,6 +258,7 @@ end
 function M:read_fd(fd_number, count)
   local entry = self.fds[fd_number]
   if not entry or not entry.description.readable then return nil, "EBADF" end
+  if count == 0 then return "" end
   local fd = entry.description
   if fd.kind == "file" then
     local data = fd.node.data:sub(fd.pos, fd.pos + count - 1)
@@ -448,6 +460,7 @@ function M:reap_child(child, status_address)
 end
 
 function M:wait4(cpu, requested, status_address, options)
+  if bit32.band(options, bit32.bnot(0x0b)) ~= 0 then return nil, "EINVAL" end
   local matching, exited
   for _, child in pairs(self.world.processes) do
     if child_matches(self, child, requested) then
@@ -515,20 +528,22 @@ function M:wake_pipe(pipe)
   for _, process in pairs(self.world.processes) do
     local request = process.wait_request
     if process.state == "blocked" and request and request.kind == "pipe_read" and request.pipe == pipe then
-      local data, read_error = process:read_fd(request.fd, request.count)
+      local data
+      if #pipe.data > 0 then data = pipe.data:sub(1, request.count)
+      elseif pipe.writers == 0 then data = "" end
       if data ~= nil then
-        process.memory:write(request.address, data)
-        result(request.cpu, #data)
-        process.wait_request, process.state = nil, "runnable"
-      elseif read_error ~= "EAGAIN" then
-        result(request.cpu, -(errno[read_error] or errno.EIO))
+        local ok = pcall(process.memory.write, process.memory, request.address, data)
+        if ok then
+          pipe.data = pipe.data:sub(#data + 1)
+          result(request.cpu, #data)
+        else result(request.cpu, -errno.EFAULT) end
         process.wait_request, process.state = nil, "runnable"
       end
     end
   end
 end
 
-function M:dispatch(cpu, next_rip)
+function M:_dispatch(cpu, next_rip)
   local nr = cpu.regs[0][1]
   local register_order, args = { 7, 6, 2, 10, 8, 9 }, { 0, 0, 0, 0, 0, 0 }
   for i = 1, syscall_argc[nr] or 0 do args[i] = number(cpu, register_order[i]) end
@@ -546,6 +561,7 @@ function M:dispatch(cpu, next_rip)
   elseif nr == 0 then -- read
     if a3 < 0 or a3 > self.io_limit then result(cpu, -errno.EINVAL)
     else
+      self:validate_range(a2, a3, Memory.PROT_WRITE, "write")
       local data, read_error = self:read_fd(a1, a3)
       if data == nil and read_error == "EAGAIN" and self.fds[a1]
           and self.fds[a1].description.kind == "pipe_read" then
@@ -792,6 +808,20 @@ function M:dispatch(cpu, next_rip)
     else for i = 0, a2 - 1 do self.memory:write8(a1 + i, self:random_byte()) end; result(cpu, a2) end
   elseif nr == 41 then result(cpu, a1 == 1 and -errno.ENOSYS or -errno.EAFNOSUPPORT)
   else result(cpu, -errno.ENOSYS) end
+end
+
+function M:dispatch(cpu, next_rip)
+  local ok, transferred = pcall(self._dispatch, self, cpu, next_rip)
+  if ok then return transferred end
+  if type(transferred) == "table" and transferred.class == "guest_fault"
+      and transferred.signal == "SIGSEGV" then
+    result(cpu, -errno.EFAULT)
+    return false
+  elseif type(transferred) == "table" and transferred.class == "sandbox_violation" then
+    result(cpu, -errno.EACCES)
+    return false
+  end
+  error(transferred, 0)
 end
 
 M.errno = errno
