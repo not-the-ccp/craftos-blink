@@ -60,16 +60,23 @@ function M:set_reg(index, value, bits)
   end
 end
 
+function M:effective_address(op, next_rip)
+  local value = u64.from_signed(op.disp or 0)
+  if op.rip_relative then value = u64.add(value, u64.from_number(next_rip)) end
+  if op.base then value = u64.add(value, self.regs[op.base]) end
+  if op.index then
+    local shift = op.scale == 8 and 3 or op.scale == 4 and 2 or op.scale == 2 and 1 or 0
+    value = u64.add(value, u64.shl(self.regs[op.index], shift))
+  end
+  return value
+end
+
 function M:address(op, next_rip)
-  local address = op.disp or 0
-  if op.rip_relative then address = address + next_rip end
-  if op.base then address = address + u64.to_number(self.regs[op.base]) end
-  if op.index then address = address + u64.to_number(self.regs[op.index]) * op.scale end
-  if op.segment == 0x64 then address = address + self.fs_base
-  elseif op.segment == 0x65 then address = address + self.gs_base end
-  if address < 0 then address = address + 9007199254740992 end
-  assert(address >= 0 and address < 9007199254740992, "non-canonical guest address")
-  return address
+  local value = self:effective_address(op, next_rip)
+  if op.segment == 0x64 then value = u64.add(value, u64.from_number(self.fs_base))
+  elseif op.segment == 0x65 then value = u64.add(value, u64.from_number(self.gs_base)) end
+  if value[2] >= 0x00200000 then guest_fault(self, "SIGSEGV", "SEGV_MAPERR") end
+  return u64.to_number(value)
 end
 
 function M:read_operand(op, bits, next_rip)
@@ -140,6 +147,23 @@ function M:binary(kind, destination, source, bits, next_rip, write)
   local b = source.kind and self:read_operand(source, bits, next_rip) or source
   local result
   if kind == "add" then result = u64.add(a, b); self:set_arithmetic_flags("add", a, b, result, bits)
+  elseif kind == "adc" or kind == "sbb" then
+    a, b = mask(a, bits), mask(b, bits)
+    local carry_in = bit32.band(self.rflags, flags.CF) ~= 0
+    result = kind == "adc" and u64.add(u64.add(a, b), carry_in and u64.one() or u64.zero())
+      or u64.sub(u64.sub(a, b), carry_in and u64.one() or u64.zero())
+    result = mask(result, bits)
+    local carry = kind == "adc" and (u64.cmp(result, a) < 0 or (carry_in and u64.eq(result, a)))
+      or (u64.cmp(a, b) < 0 or (carry_in and u64.eq(a, b)))
+    local overflow = kind == "adc" and (sign(a, bits) == sign(b, bits) and sign(result, bits) ~= sign(a, bits))
+      or kind == "sbb" and (sign(a, bits) ~= sign(b, bits) and sign(result, bits) ~= sign(a, bits))
+    local f = flags.logic(result, bits)
+    if carry then f = bit32.bor(f, flags.CF) end
+    if overflow then f = bit32.bor(f, flags.OF) end
+    if bit32.band(bit32.bxor(bit32.bxor(a[1], b[1]), result[1]), 0x10) ~= 0 then
+      f = bit32.bor(f, flags.AF)
+    end
+    self.rflags = bit32.bor(f, 2)
   elseif kind == "sub" or kind == "cmp" then
     result = u64.sub(a, b); self:set_arithmetic_flags("sub", a, b, result, bits)
   elseif kind == "and" or kind == "test" then result = u64.band(a, b); self.rflags = bit32.bor(flags.logic(mask(result, bits), bits), 2)
@@ -160,7 +184,8 @@ function M:pop()
   return value
 end
 
-local group_kinds = { [0] = "add", [1] = "or", [4] = "and", [5] = "sub", [6] = "xor", [7] = "cmp" }
+local group_kinds = { [0] = "add", [1] = "or", [2] = "adc", [3] = "sbb",
+  [4] = "and", [5] = "sub", [6] = "xor", [7] = "cmp" }
 
 function M:step()
   local start = self.rip
@@ -193,13 +218,16 @@ function M:step()
     self:set_reg(mr.reg, mask(result_value, bits), bits)
     self:set_multiply_flags(signed_multiply_overflow(left, right, bits))
     mnemonic = "imul"
-  elseif op == 0x04 or op == 0x05 or op == 0x0c or op == 0x0d or op == 0x24 or op == 0x25
+  elseif op == 0x04 or op == 0x05 or op == 0x0c or op == 0x0d or op == 0x14 or op == 0x15
+      or op == 0x1c or op == 0x1d or op == 0x24 or op == 0x25
       or op == 0x2c or op == 0x2d or op == 0x34 or op == 0x35 or op == 0x3c or op == 0x3d
       or op == 0xa8 or op == 0xa9 then
     local width = bit32.band(op, 1) == 0 and 8 or bits
     local imm = width == 8 and r:u8() or width == 16 and r:u16() or r:i32()
     local kind = (op == 0x04 or op == 0x05) and "add"
       or (op == 0x0c or op == 0x0d) and "or"
+      or (op == 0x14 or op == 0x15) and "adc"
+      or (op == 0x1c or op == 0x1d) and "sbb"
       or (op == 0x24 or op == 0x25) and "and"
       or (op == 0x2c or op == 0x2d) and "sub"
       or (op == 0x34 or op == 0x35) and "xor"
@@ -235,20 +263,25 @@ function M:step()
     self:write_operand(dst, value, width, r.pos); mnemonic = "mov"
   elseif op == 0x8d then
     local mr = r:modrm(); if mr.operand.kind ~= "mem" then guest_fault(self, "SIGILL", "ILL_ILLOPN") end
-    self:set_reg(mr.reg, u64.from_number(self:address(mr.operand, r.pos)), bits); mnemonic = "lea"
+    self:set_reg(mr.reg, self:effective_address(mr.operand, r.pos), bits); mnemonic = "lea"
   elseif op == 0x63 then
     local mr = r:modrm(); local v = self:read_operand(mr.operand, 32, r.pos)
     self:set_reg(mr.reg, u64.sign_extend(v, 32), bit32.band(r.rex, 8) ~= 0 and 64 or 32); mnemonic = "movsxd"
-  elseif op == 0x00 or op == 0x02 or op == 0x08 or op == 0x0a or op == 0x20 or op == 0x22
+  elseif op == 0x00 or op == 0x02 or op == 0x08 or op == 0x0a
+      or op == 0x10 or op == 0x11 or op == 0x12 or op == 0x13
+      or op == 0x18 or op == 0x19 or op == 0x1a or op == 0x1b or op == 0x20 or op == 0x22
       or op == 0x28 or op == 0x2a or op == 0x30 or op == 0x32 or op == 0x38 or op == 0x3a or op == 0x84
       or op == 0x01 or op == 0x03 or op == 0x09 or op == 0x0b or op == 0x21 or op == 0x23
       or op == 0x29 or op == 0x2b or op == 0x31 or op == 0x33 or op == 0x39 or op == 0x3b or op == 0x85 then
     local mr = r:modrm(); local regop = { kind = "reg", reg = mr.reg }
-    local reverse = op == 0x02 or op == 0x0a or op == 0x22 or op == 0x2a or op == 0x32 or op == 0x3a
+    local reverse = op == 0x02 or op == 0x0a or op == 0x12 or op == 0x13 or op == 0x1a or op == 0x1b
+      or op == 0x22 or op == 0x2a or op == 0x32 or op == 0x3a
       or op == 0x03 or op == 0x0b or op == 0x23 or op == 0x2b or op == 0x33 or op == 0x3b
     local dst, src = reverse and regop or mr.operand, reverse and mr.operand or regop
     local kind = (op == 0x00 or op == 0x02 or op == 0x01 or op == 0x03) and "add"
       or (op == 0x08 or op == 0x0a or op == 0x09 or op == 0x0b) and "or"
+      or (op == 0x10 or op == 0x12 or op == 0x11 or op == 0x13) and "adc"
+      or (op == 0x18 or op == 0x1a or op == 0x19 or op == 0x1b) and "sbb"
       or (op == 0x20 or op == 0x22 or op == 0x21 or op == 0x23) and "and"
       or (op == 0x28 or op == 0x2a or op == 0x29 or op == 0x2b) and "sub"
       or (op == 0x30 or op == 0x32 or op == 0x31 or op == 0x33) and "xor"
@@ -488,6 +521,15 @@ function M:step()
       self.xmm[mr.reg] = { bit32.bxor(destination[1], source[1]), bit32.bxor(destination[2], source[2]),
         bit32.bxor(destination[3], source[3]), bit32.bxor(destination[4], source[4]) }
       mnemonic = "pxor"
+    elseif op2 == 0x70 and r.prefixes.operand then
+      local mr = r:modrm()
+      local source, control = self:read_xmm_operand(mr.operand, r.pos), r:u8()
+      local shuffled = {}
+      for lane = 0, 3 do
+        shuffled[lane + 1] = source[bit32.band(bit32.rshift(control, lane * 2), 3) + 1]
+      end
+      self.xmm[mr.reg] = shuffled
+      mnemonic = "pshufd"
     elseif op2 == 0xaf then
       local mr = r:modrm()
       local left = u64.sign_extend(self:get_reg(mr.reg, bits), bits)
@@ -497,6 +539,25 @@ function M:step()
       self:set_multiply_flags(overflow)
       self:set_reg(mr.reg, mask(result_value, bits), bits)
       mnemonic = "imul"
+    elseif op2 == 0xa3 then
+      local mr = r:modrm()
+      local index = self:get_reg(mr.reg, bits)[1] % bits
+      local value = self:read_operand(mr.operand, bits, r.pos)
+      self.rflags = bit32.band(self.rflags, bit32.bnot(flags.CF))
+      if u64.bit(value, index) ~= 0 then self.rflags = bit32.bor(self.rflags, flags.CF) end
+      mnemonic = "bt"
+    elseif op2 == 0xba then
+      local mr = r:modrm()
+      if mr.opcode < 4 then guest_fault(self, "SIGILL", "ILL_ILLOPN") end
+      local index = r:u8() % bits
+      local value = self:read_operand(mr.operand, bits, r.pos)
+      local bit_value = u64.shl(u64.one(), index)
+      self.rflags = bit32.band(self.rflags, bit32.bnot(flags.CF))
+      if u64.bit(value, index) ~= 0 then self.rflags = bit32.bor(self.rflags, flags.CF) end
+      if mr.opcode == 5 then self:write_operand(mr.operand, u64.bor(value, bit_value), bits, r.pos)
+      elseif mr.opcode == 6 then self:write_operand(mr.operand, u64.band(value, u64.bnot(bit_value)), bits, r.pos)
+      elseif mr.opcode == 7 then self:write_operand(mr.operand, u64.bxor(value, bit_value), bits, r.pos) end
+      mnemonic = mr.opcode == 4 and "bt" or mr.opcode == 5 and "bts" or mr.opcode == 6 and "btr" or "btc"
     elseif op2 >= 0x80 and op2 <= 0x8f then
       local d = r:i32(); if flags.condition(op2 - 0x80, self.rflags) then r.pos = r.pos + d end; mnemonic = "jcc"
     elseif op2 >= 0x40 and op2 <= 0x4f then

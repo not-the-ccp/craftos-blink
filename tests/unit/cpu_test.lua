@@ -142,6 +142,54 @@ cpu:set_reg(1, u.from_number(3), 64)
 cpu:step()
 t.eq(u.to_number(cpu.regs[6]), 174, "three-operand signed multiply")
 
+-- cmp establishes carry; adc edi,0
+m:write(0x1300, "\72\57\200\131\215\0")
+cpu.rip = 0x1300
+cpu:set_reg(0, u.from_number(3), 64)
+cpu:set_reg(1, u.from_number(4), 64)
+cpu:set_reg(7, u.from_number(8), 32)
+cpu:step(); cpu:step()
+t.eq(u.to_number(cpu.regs[7]), 9, "add with carry")
+
+-- mov byte [rsi+rcx],0 with a negative index
+m:write(0x1320, "\198\4\14\0")
+cpu.rip = 0x1320
+cpu:set_reg(6, u.from_number(0x8300), 64)
+cpu:set_reg(1, u.from_signed(-4), 64)
+cpu:step()
+t.eq(m:read8(0x82fc), 0, "signed address index")
+
+-- lea is integer arithmetic and may produce any 64-bit bit pattern.
+m:write(0x1340, "\74\141\12\2")
+cpu.rip = 0x1340
+cpu:set_reg(2, u.new(0x01020304, 0x11121314), 64)
+cpu:set_reg(8, u.new(0xfefefeff, 0xfefefefe), 64)
+cpu:step()
+t.eq(u.hex(cpu.regs[1]), u.hex(u.add(u.new(0x01020304, 0x11121314),
+  u.new(0xfefefeff, 0xfefefefe))), "64-bit LEA arithmetic")
+
+-- pshufd xmm0,xmm0,0 broadcasts the low lane.
+m:write(0x1360, "\102\15\112\192\0")
+cpu.rip = 0x1360
+cpu.xmm[0] = { 0x2020202, 2, 3, 4 }
+cpu:step()
+t.eq(cpu.xmm[0][4], 0x2020202, "packed dword shuffle")
+
+-- bt rcx,rdx
+m:write(0x1380, "\72\15\163\209")
+cpu.rip = 0x1380
+cpu:set_reg(1, u.from_number(0x20), 64)
+cpu:set_reg(2, u.from_number(5), 64)
+cpu:step()
+t.truthy(bit32.band(cpu.rflags, require("craftos_blink.flags").CF) ~= 0, "bit test carry")
+
+-- bt ebx,10
+m:write(0x13a0, "\15\186\227\10")
+cpu.rip = 0x13a0
+cpu:set_reg(3, u.from_number(0x400), 32)
+cpu:step()
+t.truthy(bit32.band(cpu.rflags, require("craftos_blink.flags").CF) ~= 0, "immediate bit test")
+
 local fault = t.raises(function() cpu.rip = 0x1120; m:write8(0x1120, 0xf4); cpu:step() end,
   function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(fault.address, 0x1120)
