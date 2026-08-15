@@ -11,14 +11,20 @@ libc-test artifacts as defined by upstream Blink.
 Local validation is split deliberately:
 
 - `make check` runs zero-dependency Lua 5.2 unit and ELF end-to-end tests.
-- `make check-differential` compares stdout, stderr, and exit status for
-  generated x86-64 fixtures under native Linux, pinned native Blink, and the
-  Lua port.
+- `make check-differential` compares stdout, stderr, exit status, and masked
+  register/flags snapshots for generated x86-64 fixtures under native Linux,
+  pinned native Blink, and the Lua port. Undefined flags are excluded per
+  instruction rather than accidentally treated as stable state.
 - `make check-craftos-pc` downloads and SHA-256 verifies CraftOS-PC 2.8.3,
   extracts the AppImage, mounts the checkout read-only, and runs the ELF smoke
   test in headless CraftOS before calling `os.shutdown(status)`.
 - `make check-upstream` reproduces the pinned native Blink build and full
   upstream suite.
 
-The generated compatibility registry is authoritative. Planned features are
-not silently skipped and are not advertised as supported.
+`make guest-root` reproducibly builds the pinned static dash/BusyBox target.
+`tools/inventory-elf.sh build/guest-root/bin/{dash,busybox}` inventories the
+complete statically disassembled mnemonic envelope before runtime testing.
+
+The generated compatibility registry is a public claim boundary. Differential
+and focused syscall tests are required in addition to a registry entry; planned
+and partial features are not advertised as implemented.

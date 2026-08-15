@@ -1,4 +1,4 @@
-.PHONY: all check check-craftos-pc check-differential check-upstream compatibility package bootstrap craftos-pc clean
+.PHONY: all check check-craftos-pc check-differential check-upstream compatibility guest-root package bootstrap craftos-pc clean
 
 LUA ?= lua5.2
 
@@ -19,6 +19,9 @@ check-craftos-pc:
 
 check-differential:
 	./tests/differential.sh
+
+guest-root:
+	./scripts/build-guest-root.sh
 
 check:
 	./tests/build-fixtures.sh

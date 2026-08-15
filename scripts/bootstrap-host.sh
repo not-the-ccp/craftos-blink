@@ -7,8 +7,7 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y build-essential ca-certificates curl file git lua5.2 \
-  pkg-config xz-utils
+sudo apt-get install -y autoconf automake build-essential bzip2 ca-certificates curl \
+  file git lua5.2 musl-tools pkg-config strace xz-utils
 
 git submodule update --init --recursive
-

@@ -15,6 +15,11 @@ standard CC:Tweaked APIs.
 > signals, futexes, and AF_UNIX are not complete. Consult
 > `docs/compatibility.md`; do not assume an unlisted or planned facility works.
 
+An unmodified, statically linked musl dash 0.5.12 can currently start and run
+builtins such as `dash -c 'echo real dash works'`. External commands, pipelines,
+and redirections are release blockers until the process and persistent-fd
+layers pass their conformance scenarios.
+
 ## Reproducible setup
 
 ```sh
@@ -23,11 +28,17 @@ cd craftos-blink
 ./scripts/bootstrap-host.sh
 ./scripts/bootstrap-craftos-pc.sh
 ./scripts/check-upstream.sh
+./scripts/build-guest-root.sh
 ```
 
 Downloaded binaries, extracted AppImages, generated root filesystems, and
 test artifacts are stored below ignored `.cache/`, `build/`, and `rootfs/`
 directories.
+
+The guest-root builder downloads checksum-pinned dash 0.5.12 and BusyBox
+1.37.0 sources, builds static musl binaries, and creates ordinary applet copies
+because ComputerCraft filesystems do not support symlinks. Its
+`BUILD-MANIFEST` records both source and binary checksums.
 
 ## Interface
 
