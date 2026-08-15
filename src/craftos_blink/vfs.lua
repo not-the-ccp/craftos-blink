@@ -153,6 +153,35 @@ function M.new(options)
     adapter = adapter, metadata = {}, virtual = {} }, M)
 end
 
+local function copy_metadata(value, seen)
+  if type(value) ~= "table" then return value end
+  seen = seen or {}
+  if seen[value] then return seen[value] end
+  local result = {}
+  seen[value] = result
+  for key, item in pairs(value) do
+    result[copy_metadata(key, seen)] = copy_metadata(item, seen)
+  end
+  return result
+end
+
+-- Forks share the filesystem adapter and immutable virtual-node definitions,
+-- but each process owns its path context and per-path metadata. executable is
+-- a value snapshot. maps_text is intentionally the same callback; it receives
+-- the VFS being read so a process model can derive text from its own state.
+function M:clone()
+  return setmetatable({
+    root = self.root,
+    cwd = self.cwd,
+    adapter = self.adapter,
+    metadata = copy_metadata(self.metadata),
+    virtual = self.virtual,
+    executable = self.executable,
+    maps_text = self.maps_text,
+    pid = self.pid,
+  }, M)
+end
+
 function M:guest_path(path) return M.normalize(path, self.cwd) end
 
 function M:guest_path_from(path, base)
@@ -166,7 +195,7 @@ end
 
 function M:read_file(path)
   local host, guest = self:host_path(path)
-  if self.virtual[guest] then return self.virtual[guest]("read") end
+  if self.virtual[guest] then return self.virtual[guest]("read", self) end
   local data, err = self.adapter.read(host)
   if not data then return nil, err or "ENOENT" end
   return data
@@ -176,7 +205,7 @@ function M:stat(path)
   local host, guest = self:host_path(path)
   if self.virtual[guest] then
     local kind = guest:sub(1, 5) == "/dev/" and "device" or "file"
-    local data = self.virtual[guest]("read") or ""
+    local data = self.virtual[guest]("read", self) or ""
     return { kind = kind, size = #data, path = guest }
   end
   if not self.adapter.exists(host) then return nil, "ENOENT" end
@@ -221,12 +250,17 @@ function M:chdir(path)
 end
 
 function M:install_virtual_nodes(pid)
+  self.pid = pid or 1
   self.virtual["/dev/null"] = function() return "" end
   self.virtual["/dev/zero"] = function() return "" end
-  self.virtual["/proc/self/exe"] = function() return self.executable or "" end
-  self.virtual["/proc/self/maps"] = function() return self.maps_text and self.maps_text() or "" end
-  self.virtual["/proc/self/status"] = function()
-    return "Name:\tcraftos-blink\nPid:\t" .. tostring(pid or 1) .. "\nThreads:\t1\n"
+  self.virtual["/proc/self/exe"] = function(_, current)
+    return current.executable or ""
+  end
+  self.virtual["/proc/self/maps"] = function(_, current)
+    return current.maps_text and current.maps_text(current) or ""
+  end
+  self.virtual["/proc/self/status"] = function(_, current)
+    return "Name:\tcraftos-blink\nPid:\t" .. tostring(current.pid or 1) .. "\nThreads:\t1\n"
   end
 end
 
