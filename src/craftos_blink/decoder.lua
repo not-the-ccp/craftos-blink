@@ -29,7 +29,7 @@ function Reader:prefixes64()
     elseif b == 0xf3 then self.prefixes.rep = true; self.pos = self.pos + 1
     elseif b == 0x2e or b == 0x36 or b == 0x3e or b == 0x26 or b == 0x64 or b == 0x65 then
       self.prefixes.segment = b; self.pos = self.pos + 1
-    elseif b >= 0x40 and b <= 0x4f then rex = b; self.pos = self.pos + 1
+    elseif b >= 0x40 and b <= 0x4f then rex = b; self.rex_present = true; self.pos = self.pos + 1
     else break end
     if self.pos - self.start >= 15 then
       error({ class = "guest_fault", signal = "SIGILL", code = "ILL_ILLOPN", address = self.start }, 0)
@@ -44,12 +44,16 @@ local function rexbit(rex, mask) return bit32.band(rex, mask) ~= 0 and 8 or 0 en
 function Reader:modrm()
   local byte = self:u8()
   local mod = bit32.rshift(byte, 6)
-  local reg = bit32.band(bit32.rshift(byte, 3), 7) + rexbit(self.rex, 4)
+  local reg_low = bit32.band(bit32.rshift(byte, 3), 7)
+  local reg = reg_low + rexbit(self.rex, 4)
   local rm_low = bit32.band(byte, 7)
   local rm = rm_low + rexbit(self.rex, 1)
-  local operand = { kind = mod == 3 and "reg" or "mem", reg = rm }
+  local operand = { kind = mod == 3 and "reg" or "mem", reg = rm,
+    high8 = mod == 3 and not self.rex_present and rm_low >= 4 or nil }
   local info = { byte = byte, mod = mod, opcode = bit32.band(bit32.rshift(byte, 3), 7),
-    reg = reg, rm = rm, operand = operand }
+    reg = reg, rm = rm, operand = operand,
+    reg_operand = { kind = "reg", reg = reg,
+      high8 = not self.rex_present and reg_low >= 4 or nil } }
   if mod == 3 then return info end
 
   operand.segment = self.prefixes.segment

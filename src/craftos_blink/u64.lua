@@ -116,19 +116,83 @@ end
 function M.ror(a, n) return M.rol(a, 64 - (n % 64)) end
 
 -- 16-bit limbs keep every intermediate exactly representable by doubles.
-function M.mul(a, b)
+function M.mul_wide(a, b)
   local x = { a[1] % TWO16, math.floor(a[1] / TWO16), a[2] % TWO16, math.floor(a[2] / TWO16) }
   local y = { b[1] % TWO16, math.floor(b[1] / TWO16), b[2] % TWO16, math.floor(b[2] / TWO16) }
-  local z = { 0, 0, 0, 0 }
+  local z = { 0, 0, 0, 0, 0, 0, 0, 0 }
   for i = 1, 4 do
-    for j = 1, 5 - i do z[i + j - 1] = z[i + j - 1] + x[i] * y[j] end
+    for j = 1, 4 do z[i + j - 1] = z[i + j - 1] + x[i] * y[j] end
   end
-  for i = 1, 3 do
+  for i = 1, 7 do
     local carry = math.floor(z[i] / TWO16)
     z[i], z[i + 1] = z[i] % TWO16, z[i + 1] + carry
   end
-  z[4] = z[4] % TWO16
-  return { z[1] + z[2] * TWO16, z[3] + z[4] * TWO16 }
+  z[8] = z[8] % TWO16
+  return { z[1] + z[2] * TWO16, z[3] + z[4] * TWO16 },
+    { z[5] + z[6] * TWO16, z[7] + z[8] * TWO16 }
+end
+
+function M.mul(a, b)
+  local low = M.mul_wide(a, b)
+  return low
+end
+
+local function words128(high, low) return { low[1], low[2], high[1], high[2] } end
+
+local function cmp128(a, b)
+  for i = 4, 1, -1 do
+    if a[i] ~= b[i] then return a[i] < b[i] and -1 or 1 end
+  end
+  return 0
+end
+
+local function sub128(a, b)
+  local result, borrow = {}, 0
+  for i = 1, 4 do
+    local difference = a[i] - b[i] - borrow
+    if difference < 0 then difference, borrow = difference + TWO32, 1 else borrow = 0 end
+    result[i] = difference
+  end
+  return result
+end
+
+local function shl128(a)
+  local result, carry = {}, 0
+  for i = 1, 4 do
+    result[i] = bit.bor(bit.lshift(a[i], 1), carry)
+    carry = bit.rshift(a[i], 31)
+  end
+  return result
+end
+
+function M.divmod128(high, low, divisor)
+  assert(not M.is_zero(divisor), "integer division by zero")
+  local dividend = words128(high, low)
+  local divisor128 = { divisor[1], divisor[2], 0, 0 }
+  local remainder, quotient, overflow = { 0, 0, 0, 0 }, { 0, 0 }, false
+  for i = 127, 0, -1 do
+    remainder = shl128(remainder)
+    local word_index, bit_index = math.floor(i / 32) + 1, i % 32
+    if bit.band(bit.rshift(dividend[word_index], bit_index), 1) ~= 0 then
+      remainder[1] = bit.bor(remainder[1], 1)
+    end
+    if cmp128(remainder, divisor128) >= 0 then
+      remainder = sub128(remainder, divisor128)
+      if i >= 64 then overflow = true
+      else
+        local qword = math.floor(i / 32) + 1
+        quotient[qword] = bit.bor(quotient[qword], bit.lshift(1, i % 32))
+      end
+    end
+  end
+  return { quotient[1], quotient[2] }, { remainder[1], remainder[2] }, overflow
+end
+
+function M.neg128(high, low)
+  local result_low = M.neg(low)
+  local result_high = M.bnot(high)
+  if M.is_zero(result_low) then result_high = M.add32(result_high, 1) end
+  return result_high, result_low
 end
 
 function M.bit(a, n)
@@ -214,4 +278,3 @@ end
 function M.hex(a) return string.format("%08x%08x", a[2], a[1]) end
 
 return M
-

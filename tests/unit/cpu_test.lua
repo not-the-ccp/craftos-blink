@@ -190,6 +190,55 @@ cpu:set_reg(3, u.from_number(0x400), 32)
 cpu:step()
 t.truthy(bit32.band(cpu.rflags, require("craftos_blink.flags").CF) ~= 0, "immediate bit test")
 
+-- pushfq/pop r11 exposes the architectural flags word.
+m:write(0x13c0, "\156\65\91")
+cpu.rip = 0x13c0
+cpu.rflags = 0x895
+cpu:step(); cpu:step()
+t.eq(cpu.regs[11][1], 0x895, "push flags")
+
+-- Legacy high-byte registers exist only when no REX prefix is present.
+m:write(0x13e0, "\180\18\64\180\52")
+cpu.rip = 0x13e0
+cpu:set_reg(0, u.from_number(0x55660000), 64)
+cpu:set_reg(4, u.from_number(0x8800), 64)
+cpu:step(); cpu:step()
+t.eq(cpu.regs[0][1], 0x55661200, "mov ah immediate")
+t.eq(bit32.band(cpu.regs[4][1], 0xff), 0x34, "REX mov spl immediate")
+
+-- Operand-width rotates wrap within the selected register width.
+m:write(0x1400, "\209\192")
+cpu.rip = 0x1400
+cpu:set_reg(0, u.from_number(0x80000000), 32)
+cpu:step()
+t.eq(cpu.regs[0][1], 1, "32-bit rotate left")
+
+-- Arithmetic status updates preserve direction, interrupt, and trap flags.
+m:write(0x1420, "\72\131\192\1")
+cpu.rip = 0x1420
+cpu.rflags = bit32.bor(2, 0x100, 0x200, 0x400)
+cpu:step()
+t.eq(bit32.band(cpu.rflags, 0x700), 0x700, "control flags survive arithmetic")
+
+-- Full-width multiply and 128-bit dividend division.
+m:write(0x1440, "\72\247\225\72\247\241")
+cpu.rip = 0x1440
+cpu:set_reg(0, u.new(0xffffffff, 0xffffffff), 64)
+cpu:set_reg(1, u.from_number(2), 64)
+cpu:step()
+t.eq(u.hex(cpu.regs[0]), "fffffffffffffffe", "64-bit multiply low")
+t.eq(u.hex(cpu.regs[2]), "0000000000000001", "64-bit multiply high")
+cpu:set_reg(0, u.zero(), 64)
+cpu:set_reg(2, u.one(), 64)
+cpu:step()
+t.eq(u.hex(cpu.regs[0]), "8000000000000000", "128-by-64 division quotient")
+t.eq(u.hex(cpu.regs[2]), "0000000000000000", "128-by-64 division remainder")
+
+local lock_fault = t.raises(function()
+  cpu.rip = 0x1460; m:write(0x1460, "\240\144"); cpu:step()
+end, function(e) return type(e) == "table" and e.signal == "SIGILL" end)
+t.eq(lock_fault.code, "ILL_ILLOPN", "LOCK rejected until atomic semantics exist")
+
 local fault = t.raises(function() cpu.rip = 0x1120; m:write8(0x1120, 0xf4); cpu:step() end,
   function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(fault.address, 0x1120)

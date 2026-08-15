@@ -16,3 +16,8 @@ m:write(0x1010, "\76\139\5\52\18\0\0") -- mov r8,[rip+0x1234]
 r = decoder.reader(m, 0x1010); r:prefixes64(); r:u8(); mr = r:modrm()
 t.eq(mr.reg, 8); t.truthy(mr.operand.rip_relative); t.eq(mr.operand.disp, 0x1234)
 
+m:write(0x1020, "\136\228\64\136\228") -- mov ah,ah; mov spl,spl
+r = decoder.reader(m, 0x1020); r:prefixes64(); r:u8(); mr = r:modrm()
+t.truthy(mr.reg_operand.high8); t.truthy(mr.operand.high8)
+r = decoder.reader(m, 0x1022); r:prefixes64(); r:u8(); mr = r:modrm()
+t.eq(r.rex_present, true); t.eq(mr.reg_operand.high8, nil); t.eq(mr.operand.high8, nil)
