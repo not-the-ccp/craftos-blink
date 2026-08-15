@@ -20,22 +20,33 @@ function M.new(memory, options)
     syscall = options.syscall, trace = options.trace, halted = false }, M)
 end
 
-function M:read_xmm_operand(op, next_rip)
+-- Packed XMM lanes are stored in little-endian dword order.  The legacy
+-- aligned moves raise #GP for an unaligned memory operand, which Linux
+-- exposes to a userspace process as SIGSEGV.  Check this before touching
+-- memory so an unaligned, unmapped address has the architectural alignment
+-- result rather than an implementation-dependent page fault.
+function M:xmm_address(op, next_rip, aligned)
+  local address = self:address(op, next_rip)
+  if aligned and address % 16 ~= 0 then guest_fault(self, "SIGSEGV", "SEGV_ACCERR") end
+  return address
+end
+
+function M:read_xmm_operand(op, next_rip, aligned)
   if op.kind == "reg" then
     local value = self.xmm[op.reg]
     return { value[1], value[2], value[3], value[4] }
   end
-  local address = self:address(op, next_rip)
+  local address = self:xmm_address(op, next_rip, aligned)
   return { self.memory:read_u32(address), self.memory:read_u32(address + 4),
     self.memory:read_u32(address + 8), self.memory:read_u32(address + 12) }
 end
 
-function M:write_xmm_operand(op, value, next_rip)
+function M:write_xmm_operand(op, value, next_rip, aligned)
   if op.kind == "reg" then
     self.xmm[op.reg] = { value[1], value[2], value[3], value[4] }
     return
   end
-  local address = self:address(op, next_rip)
+  local address = self:xmm_address(op, next_rip, aligned)
   for i = 1, 4 do self.memory:write_u32(address + (i - 1) * 4, value[i]) end
 end
 
@@ -627,15 +638,32 @@ function M:step()
       local width = bit32.band(r.rex, 8) ~= 0 and 64 or 32
       self:write_operand(mr.operand, u64.new(self.xmm[mr.reg][1], self.xmm[mr.reg][2]), width, r.pos)
       mnemonic = width == 64 and "movq" or "movd"
-    elseif op2 == 0x28 or op2 == 0x10 or (op2 == 0x6f and (r.prefixes.operand or r.prefixes.rep)) then
+    elseif (op2 == 0x28 or op2 == 0x10) and not r.prefixes.operand and not r.prefixes.rep
+        and not r.prefixes.repne
+      or op2 == 0x6f and ((r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne)
+        or (r.prefixes.rep and not r.prefixes.operand and not r.prefixes.repne)) then
       local mr = r:modrm()
-      self.xmm[mr.reg] = self:read_xmm_operand(mr.operand, r.pos)
+      local aligned = op2 == 0x28 or (op2 == 0x6f and r.prefixes.operand)
+      self.xmm[mr.reg] = self:read_xmm_operand(mr.operand, r.pos, aligned)
       mnemonic = op2 == 0x28 and "movaps" or op2 == 0x10 and "movups"
         or r.prefixes.rep and "movdqu" or "movdqa"
-    elseif op2 == 0x29 or op2 == 0x11 or (op2 == 0x7f and r.prefixes.operand) then
+    elseif (op2 == 0x29 or op2 == 0x11) and not r.prefixes.operand and not r.prefixes.rep
+        and not r.prefixes.repne
+      or op2 == 0x7f and ((r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne)
+        or (r.prefixes.rep and not r.prefixes.operand and not r.prefixes.repne)) then
       local mr = r:modrm()
-      self:write_xmm_operand(mr.operand, self.xmm[mr.reg], r.pos)
-      mnemonic = op2 == 0x29 and "movaps" or op2 == 0x11 and "movups" or "movdqa"
+      local aligned = op2 == 0x29 or (op2 == 0x7f and r.prefixes.operand)
+      self:write_xmm_operand(mr.operand, self.xmm[mr.reg], r.pos, aligned)
+      mnemonic = op2 == 0x29 and "movaps" or op2 == 0x11 and "movups"
+        or r.prefixes.rep and "movdqu" or "movdqa"
+    elseif op2 == 0x12 and not r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      -- The register encoding is MOVHLPS.  Its memory form is MOVLPS,
+      -- deliberately outside this packed-integer baseline.
+      if mr.operand.kind ~= "reg" then guest_fault(self, "SIGILL", "ILL_ILLOPN") end
+      local source, destination = self.xmm[mr.operand.reg], self.xmm[mr.reg]
+      self.xmm[mr.reg] = { source[3], source[4], destination[3], destination[4] }
+      mnemonic = "movhlps"
     elseif op2 == 0x6c and r.prefixes.operand then
       local mr = r:modrm()
       local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
@@ -656,6 +684,52 @@ function M:step()
       end
       self.xmm[mr.reg] = shuffled
       mnemonic = "pshufd"
+    elseif op2 == 0x62 and r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
+      self.xmm[mr.reg] = { destination[1], source[1], destination[2], source[2] }
+      mnemonic = "punpckldq"
+    elseif op2 == 0xd4 and r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
+      local low = u64.add(u64.new(destination[1], destination[2]), u64.new(source[1], source[2]))
+      local high = u64.add(u64.new(destination[3], destination[4]), u64.new(source[3], source[4]))
+      self.xmm[mr.reg] = { low[1], low[2], high[1], high[2] }
+      mnemonic = "paddq"
+    elseif op2 == 0xeb and r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
+      self.xmm[mr.reg] = { bit32.bor(destination[1], source[1]), bit32.bor(destination[2], source[2]),
+        bit32.bor(destination[3], source[3]), bit32.bor(destination[4], source[4]) }
+      mnemonic = "por"
+    elseif op2 == 0xfb and r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
+      local low = u64.sub(u64.new(destination[1], destination[2]), u64.new(source[1], source[2]))
+      local high = u64.sub(u64.new(destination[3], destination[4]), u64.new(source[3], source[4]))
+      self.xmm[mr.reg] = { low[1], low[2], high[1], high[2] }
+      mnemonic = "psubq"
+    elseif op2 == 0x73 and r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr, count = r:modrm(), r:u8()
+      if mr.opcode ~= 3 or mr.operand.kind ~= "reg" then guest_fault(self, "SIGILL", "ILL_ILLOPN") end
+      local source, shifted = self.xmm[mr.operand.reg], {}
+      for lane = 1, 4 do shifted[lane] = count < 16 and (source[lane + math.floor(count / 4)] or 0) or 0 end
+      if count < 16 and count % 4 ~= 0 then
+        local bits = (count % 4) * 8
+        for lane = 1, 4 do
+          local low = source[lane + math.floor(count / 4)] or 0
+          local high = source[lane + math.floor(count / 4) + 1] or 0
+          shifted[lane] = bit32.bor(bit32.rshift(low, bits), bit32.lshift(high, 32 - bits))
+        end
+      end
+      self.xmm[mr.operand.reg] = shifted
+      mnemonic = "psrldq"
+    elseif op2 == 0x57 and not r.prefixes.operand and not r.prefixes.rep and not r.prefixes.repne then
+      local mr = r:modrm()
+      local source, destination = self:read_xmm_operand(mr.operand, r.pos), self.xmm[mr.reg]
+      self.xmm[mr.reg] = { bit32.bxor(destination[1], source[1]), bit32.bxor(destination[2], source[2]),
+        bit32.bxor(destination[3], source[3]), bit32.bxor(destination[4], source[4]) }
+      mnemonic = "xorps"
     elseif op2 == 0xaf then
       local mr = r:modrm()
       local left = u64.sign_extend(self:get_reg(mr.reg, bits), bits)

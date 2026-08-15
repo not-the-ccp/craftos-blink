@@ -2,6 +2,7 @@
 set -eu
 
 ./tests/build-fixtures.sh
+cc -nostdlib -static -Wl,--build-id=none -o build/fixtures/simd tests/fixtures/simd.S
 blink=vendor/blink/o/blink/blink
 if [ ! -x "$blink" ]; then
   echo "differential: run scripts/check-upstream.sh first" >&2
@@ -29,7 +30,7 @@ for fixture in hello arithmetic; do
 done
 
 # CPU state fixtures write a masked register/flags snapshot rather than text.
-for fixture in cpu_flags; do
+for fixture in cpu_flags simd; do
   native_status=$(run_status "build/$fixture.native" "./build/fixtures/$fixture")
   blink_status=$(run_status "build/$fixture.blink" "$blink" "build/fixtures/$fixture")
   lua_status=$(run_status "build/$fixture.lua" lua5.2 bin/craftos-blink.lua --root . "/build/fixtures/$fixture")

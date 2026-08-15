@@ -20,17 +20,25 @@ This file is generated from `src/craftos_blink/registry.lua`. A feature is suppo
 | LEA | `8D` | integer | **implemented** |
 | LEAVE | `C9` | control | **implemented** |
 | MOV | `88-8B/B0-BF/C6/C7` | integer | **implemented** |
+| MOVAPS/MOVDQA | `0F 28/29, 66 0F 6F/7F` | vector | **implemented** |
+| MOVDQU | `F3 0F 6F/7F` | vector | **implemented** |
+| MOVHLPS | `0F 12 C0-FF` | vector | **implemented** |
 | MOVSX/MOVSXD/MOVZX | `0F BE/BF/B6/B7/63` | integer | **implemented** |
 | NOP | `90/0F 1F` | control | **implemented** |
+| PAUSE | `F3 90` | control | **implemented** |
 | OR | `09/0B/81.1/83.1` | integer | **implemented** |
+| PADDQ/POR/PSUBQ | `66 0F D4/EB/FB` | vector | **implemented** |
 | POP | `58-5F` | stack | **implemented** |
 | PUSH | `50-57/68/6A/FF.6` | stack | **implemented** |
+| PSRLDQ | `66 0F 73 /3 ib` | vector | **implemented** |
+| PUNPCKLDQ | `66 0F 62` | vector | **implemented** |
 | RET | `C3` | control | **implemented** |
 | SHLD/SHRD | `0F A4-A5/0F AC-AD` | integer | **implemented** |
 | SUB | `29/2B/81.5/83.5` | integer | **implemented** |
 | SYSCALL | `0F 05` | system | **implemented** |
 | TEST | `85/F7.0` | integer | **implemented** |
 | XOR | `31/33/81.6/83.6` | integer | **implemented** |
+| XORPS | `0F 57` | vector | **implemented** |
 | x87 | `D8-DF` | floating-point | **planned** |
 | SSE2/SSE3/SSSE3 | `0F maps` | vector | **planned** |
 | CLMUL/POPCNT/ADX/BMI2 | `0F maps` | extended | **planned** |

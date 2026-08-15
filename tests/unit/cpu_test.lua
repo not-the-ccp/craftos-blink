@@ -246,6 +246,75 @@ m:write_u32(0x8400, 0x12345678)
 cpu:step()
 t.eq(m:read_u32(0x8400), 0x12345678, "valid LOCKed memory RMW")
 
+-- movdqu stores do not require 16-byte alignment.
+m:write(0x1500, "\243\15\127\2")
+cpu.rip = 0x1500
+cpu:set_reg(2, u.from_number(0x8501), 64)
+cpu.xmm[0] = { 0x11223344, 0x55667788, 0x99aabbcc, 0xddeeff00 }
+cpu:step()
+t.eq(m:read_u32(0x8501), 0x11223344, "movdqu unaligned store low lane")
+t.eq(m:read_u32(0x850d), 0xddeeff00, "movdqu unaligned store high lane")
+
+-- Packed SSE2 operations preserve lane order and leave integer flags alone.
+m:write(0x1520, "\15\18\193\102\15\212\193\102\15\235\193\102\15\251\193\102\15\98\193\102\15\115\216\5\15\87\193\243\144")
+cpu.rip = 0x1520
+cpu.rflags = 0x6d7
+cpu.xmm[0], cpu.xmm[1] = { 10, 20, 30, 40 }, { 1, 2, 3, 4 }
+cpu:step()
+t.eq(cpu.xmm[0][1], 3, "movhlps low qword from source high qword")
+t.eq(cpu.xmm[0][4], 40, "movhlps keeps destination high qword")
+cpu.xmm[0], cpu.xmm[1] = { 0xffffffff, 0, 0xffffffff, 0xffffffff }, { 1, 0, 2, 0 }
+cpu:step()
+t.eq(cpu.xmm[0][1], 0, "paddq low lane carry")
+t.eq(cpu.xmm[0][2], 1, "paddq low lane high word")
+t.eq(cpu.xmm[0][3], 1, "paddq high lane carry")
+cpu.xmm[0], cpu.xmm[1] = { 0x00ff0000, 0xf0000000, 0, 0x80000000 }, { 0xff0000ff, 0x0f000000, 1, 0x7fffffff }
+cpu:step()
+t.eq(cpu.xmm[0][1], 0xffff00ff, "por low word")
+t.eq(cpu.xmm[0][2], 0xff000000, "por high word")
+cpu.xmm[0], cpu.xmm[1] = { 0, 2, 0, 0 }, { 1, 0, 1, 0 }
+cpu:step()
+t.eq(cpu.xmm[0][1], 0xffffffff, "psubq borrows within low qword")
+t.eq(cpu.xmm[0][2], 1, "psubq low qword result")
+t.eq(cpu.xmm[0][3], 0xffffffff, "psubq high qword result")
+cpu.xmm[0], cpu.xmm[1] = { 10, 20, 30, 40 }, { 1, 2, 3, 4 }
+cpu:step()
+t.eq(cpu.xmm[0][1], 10, "punpckldq first destination lane")
+t.eq(cpu.xmm[0][2], 1, "punpckldq first source lane")
+t.eq(cpu.xmm[0][3], 20, "punpckldq second destination lane")
+t.eq(cpu.xmm[0][4], 2, "punpckldq second source lane")
+cpu.xmm[0] = { 0x04030201, 0x08070605, 0x0c0b0a09, 0x100f0e0d }
+cpu:step()
+t.eq(cpu.xmm[0][1], 0x09080706, "psrldq shifts across dword lanes")
+t.eq(cpu.xmm[0][4], 0, "psrldq zero-fills the high end")
+cpu.xmm[0], cpu.xmm[1] = { 0xffffffff, 0, 0xaaaaaaaa, 0x55555555 }, { 0x0f0f0f0f, 0xffffffff, 0x55555555, 0xaaaaaaaa }
+cpu:step()
+t.eq(cpu.xmm[0][1], 0xf0f0f0f0, "xorps low lane")
+t.eq(cpu.xmm[0][4], 0xffffffff, "xorps high lane")
+t.eq(cpu:step(), "pause", "pause has no architectural state change")
+t.eq(cpu.rflags, 0x6d7, "packed SSE2 operations preserve flags")
+
+m:write(0x1560, "\102\15\115\216\16")
+cpu.rip = 0x1560
+cpu.xmm[0] = { 1, 2, 3, 4 }
+cpu:step()
+t.eq(cpu.xmm[0][1] + cpu.xmm[0][2] + cpu.xmm[0][3] + cpu.xmm[0][4], 0,
+  "psrldq count at least 16 clears the destination")
+
+-- MOVAPS and MOVDQA require an aligned memory operand; MOVDQU above does not.
+local function expect_alignment_fault(bytes, address, label)
+  m:write(0x1580, bytes)
+  cpu.rip = 0x1580
+  cpu:set_reg(2, u.from_number(address), 64)
+  local alignment_fault = t.raises(function() cpu:step() end,
+    function(e) return type(e) == "table" and e.signal == "SIGSEGV" and e.code == "SEGV_ACCERR" end)
+  t.eq(alignment_fault.address, 0x1580, label)
+end
+expect_alignment_fault("\15\40\2", 0x8501, "movaps load alignment fault")
+expect_alignment_fault("\15\41\2", 0x8501, "movaps store alignment fault")
+expect_alignment_fault("\102\15\111\2", 0x8501, "movdqa load alignment fault")
+expect_alignment_fault("\102\15\127\2", 0x8501, "movdqa store alignment fault")
+
 local fault = t.raises(function() cpu.rip = 0x1120; m:write8(0x1120, 0xf4); cpu:step() end,
   function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(fault.address, 0x1120)
