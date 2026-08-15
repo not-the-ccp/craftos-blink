@@ -41,8 +41,16 @@ local function cc_adapter()
     end,
     exists = fs.exists,
     is_dir = fs.isDir,
-    make_dir = fs.makeDir,
-    delete = fs.delete,
+    list = fs.list,
+    make_dir = function(path)
+      local ok, err = pcall(fs.makeDir, path)
+      if not ok then return nil, "EACCES" end
+      return fs.isDir(path) and true or nil, err and "EACCES" or "EIO"
+    end,
+    delete = function(path)
+      local ok = pcall(fs.delete, path)
+      return ok and true or nil, "EACCES"
+    end,
     combine = fs.combine,
   }
 end
@@ -59,12 +67,25 @@ local function command_line(command)
   return ok and value or nil
 end
 
+local function command_output(command)
+  local handle = io.popen(command, "r")
+  if not handle then return nil end
+  local value = handle:read("*a")
+  local ok = handle:close()
+  return ok and value or nil
+end
+
+local function command_ok(command)
+  local ok = os.execute(command)
+  return ok == true or ok == 0
+end
+
 local function posix_adapter(root)
   local canonical_root = command_line("realpath -m -- " .. shell_quote(root))
   assert(canonical_root, "realpath is required by the POSIX sandbox adapter")
   local function resolve(path, allow_missing)
     local option = allow_missing and "-m" or "-e"
-    local canonical = command_line("realpath " .. option .. " -- " .. shell_quote(path))
+    local canonical = command_line("realpath " .. option .. " -- " .. shell_quote(path) .. " 2>/dev/null")
     if not canonical then return nil, "ENOENT" end
     if canonical_root ~= "/" and canonical ~= canonical_root
         and canonical:sub(1, #canonical_root + 1) ~= canonical_root .. "/" then
@@ -90,12 +111,36 @@ local function posix_adapter(root)
     exists = function(path)
       local safe = resolve(path, false)
       if not safe then return false end
-      local h = io.open(safe, "rb"); if h then h:close(); return true end; return false
+      return command_ok("test -e " .. shell_quote(safe))
     end,
     is_dir = function(path)
       local safe = resolve(path, false)
       if not safe then return false end
       return command_line("test -d " .. shell_quote(safe) .. " && printf yes") == "yes"
+    end,
+    list = function(path)
+      local safe, err = resolve(path, false)
+      if not safe then return nil, err end
+      if not command_ok("test -d " .. shell_quote(safe)) then return nil, "ENOTDIR" end
+      local data = command_output("find " .. shell_quote(safe) ..
+        " -mindepth 1 -maxdepth 1 -printf '%f\\0'")
+      if data == nil then return nil, "EACCES" end
+      local names = {}
+      for name in data:gmatch("([^%z]+)%z") do names[#names + 1] = name end
+      table.sort(names)
+      return names
+    end,
+    make_dir = function(path)
+      local safe, err = resolve(path, true)
+      if not safe then return nil, err end
+      if command_ok("mkdir -- " .. shell_quote(safe)) then return true end
+      return nil, command_ok("test -e " .. shell_quote(safe)) and "EEXIST" or "EACCES"
+    end,
+    delete = function(path)
+      local safe, err = resolve(path, false)
+      if not safe then return nil, err end
+      if command_ok("rm -f -- " .. shell_quote(safe)) then return true end
+      return nil, "EACCES"
     end,
     combine = function(a, b) return a:gsub("/$", "") .. "/" .. b:gsub("^/", "") end,
   }
@@ -110,6 +155,10 @@ end
 
 function M:guest_path(path) return M.normalize(path, self.cwd) end
 
+function M:guest_path_from(path, base)
+  return M.normalize(path, base or self.cwd)
+end
+
 function M:host_path(path)
   local guest = self:guest_path(path)
   return self.adapter.combine(self.root, guest:sub(2)), guest
@@ -121,6 +170,35 @@ function M:read_file(path)
   local data, err = self.adapter.read(host)
   if not data then return nil, err or "ENOENT" end
   return data
+end
+
+function M:stat(path)
+  local host, guest = self:host_path(path)
+  if self.virtual[guest] then
+    local kind = guest:sub(1, 5) == "/dev/" and "device" or "file"
+    local data = self.virtual[guest]("read") or ""
+    return { kind = kind, size = #data, path = guest }
+  end
+  if not self.adapter.exists(host) then return nil, "ENOENT" end
+  if self.adapter.is_dir and self.adapter.is_dir(host) then
+    return { kind = "directory", size = 0, path = guest }
+  end
+  local data, err = self.adapter.read(host)
+  if data == nil then return nil, err or "EACCES" end
+  return { kind = "file", size = #data, path = guest }
+end
+
+function M:list(path)
+  local host = self:host_path(path)
+  if not self.adapter.list then return nil, "ENOSYS" end
+  return self.adapter.list(host)
+end
+
+function M:make_dir(path)
+  local host, guest = self:host_path(path)
+  if self.virtual[guest] then return nil, "EEXIST" end
+  if not self.adapter.make_dir then return nil, "ENOSYS" end
+  return self.adapter.make_dir(host)
 end
 
 function M:write_file(path, data)
