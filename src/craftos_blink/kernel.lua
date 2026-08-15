@@ -111,6 +111,13 @@ function M:attach_cpu(cpu)
   return self
 end
 
+function M:emit_instruction(event)
+  if self.instruction_trace then
+    event.pid = self.pid
+    self.instruction_trace(event)
+  end
+end
+
 function M:cstring(address, limit)
   local out = {}
   for i = 0, (limit or 4096) - 1 do
@@ -385,7 +392,8 @@ function M:fork_process(cpu, next_rip)
   end
 
   local child_cpu
-  child_cpu = CPU.new(child_memory, { rip = next_rip, trace = self.instruction_trace,
+  child_cpu = CPU.new(child_memory, { rip = next_rip,
+    trace = self.instruction_trace and function(event) child:emit_instruction(event) end or nil,
     syscall = function(current, return_rip) return child:dispatch(current, return_rip) end })
   for reg = 0, 15 do
     child_cpu.regs[reg] = u64.clone(cpu.regs[reg])
@@ -485,7 +493,10 @@ function M:wake_waiters()
         if child.state == "exited" and child_matches(process, child, request.requested) then exited = child; break end
       end
       if exited then
-        result(request.cpu, process:reap_child(exited, request.status))
+        local pid = process:reap_child(exited, request.status)
+        result(request.cpu, pid)
+        if process.trace then process.trace({ phase = "resume", pid = process.pid,
+          number = 61, result = pid, state = "runnable" }) end
         process.wait_request, process.state = nil, "runnable"
       end
     end
@@ -536,6 +547,8 @@ function M:wake_pipe(pipe)
         if ok then
           pipe.data = pipe.data:sub(#data + 1)
           result(request.cpu, #data)
+          if process.trace then process.trace({ phase = "resume", pid = process.pid,
+            number = 0, result = #data, state = "runnable" }) end
         else result(request.cpu, -errno.EFAULT) end
         process.wait_request, process.state = nil, "runnable"
       end
@@ -550,7 +563,8 @@ function M:_dispatch(cpu, next_rip)
   local a1, a2, a3, a4, a5, a6 = args[1], args[2], args[3], args[4], args[5], args[6]
   self.syscalls = self.syscalls + 1
   self.world.syscalls = self.world.syscalls + 1
-  if self.trace then self.trace({ number = nr, args = { a1, a2, a3, a4, a5, a6 } }) end
+  if self.trace then self.trace({ phase = "enter", pid = self.pid,
+    number = nr, args = { a1, a2, a3, a4, a5, a6 }, state = self.state }) end
 
   if nr == 1 then -- write
     if a3 < 0 or a3 > self.io_limit then result(cpu, -errno.EINVAL)
@@ -811,17 +825,30 @@ function M:_dispatch(cpu, next_rip)
 end
 
 function M:dispatch(cpu, next_rip)
+  local syscall_number = cpu.regs[0][1]
   local ok, transferred = pcall(self._dispatch, self, cpu, next_rip)
-  if ok then return transferred end
+  if ok then
+    if self.trace then
+      local value = cpu.regs[0]
+      local numeric = self.state == "blocked" and nil or
+        (value[2] >= 0xffe00000 and u64.to_signed_number(value)
+          or value[2] < 0x00200000 and u64.to_number(value) or nil)
+      self.trace({ phase = "exit", pid = self.pid, number = syscall_number,
+        result = numeric, result_hex = u64.hex(value), state = self.state,
+        transferred = not not transferred })
+    end
+    return transferred
+  end
   if type(transferred) == "table" and transferred.class == "guest_fault"
       and transferred.signal == "SIGSEGV" then
     result(cpu, -errno.EFAULT)
-    return false
   elseif type(transferred) == "table" and transferred.class == "sandbox_violation" then
     result(cpu, -errno.EACCES)
-    return false
-  end
-  error(transferred, 0)
+  else error(transferred, 0) end
+  if self.trace then self.trace({ phase = "exit", pid = self.pid, number = syscall_number,
+    result = u64.to_signed_number(cpu.regs[0]),
+    result_hex = u64.hex(cpu.regs[0]), state = self.state }) end
+  return false
 end
 
 M.errno = errno

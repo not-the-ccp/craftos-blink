@@ -215,6 +215,16 @@ t.eq(syscall(1, fault_write_fd, 0x74000000, 2), -14, "write invalid buffer retur
 t.eq(files["root/faultfile"], "", "EFAULT write has no filesystem effect")
 t.eq(syscall(2, guest_string("../../escape"), 0, 0), -13, "sandbox escape returns EACCES")
 
+local trace_events = {}
+fs_kernel.trace = function(event) trace_events[#trace_events + 1] = event end
+t.eq(syscall(39), 1, "traced getpid")
+t.eq(trace_events[1].phase, "enter", "syscall trace enter phase")
+t.eq(trace_events[1].pid, 1, "syscall trace pid")
+t.eq(trace_events[1].number, 39, "syscall trace number")
+t.eq(trace_events[2].phase, "exit", "syscall trace exit phase")
+t.eq(trace_events[2].result, 1, "syscall trace result")
+fs_kernel.trace = nil
+
 -- Process objects share open-file descriptions and pipes while keeping COW
 -- memory and wait state distinct. Drive the handlers at syscall return RIPs so
 -- a forked child cannot accidentally re-execute the fork instruction.

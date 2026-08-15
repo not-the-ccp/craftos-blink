@@ -38,7 +38,8 @@ function M.run(config)
   local loaded = ELF.load(memory, vfs, config.program, { argv = config.argv or { config.program },
     env = environment_list(config.environment or {}), base = config.base, stack_size = config.stack_size })
   local cpu
-  cpu = CPU.new(memory, { rip = loaded.entry, trace = instruction_trace,
+  cpu = CPU.new(memory, { rip = loaded.entry,
+    trace = instruction_trace and function(event) kernel:emit_instruction(event) end or nil,
     syscall = function(c, next_rip) return kernel:dispatch(c, next_rip) end })
   cpu:set_reg(4, u64.from_number(loaded.stack), 64)
   kernel:attach_cpu(cpu)
@@ -50,6 +51,23 @@ function M.run(config)
   local instructions, root_fault = 0, nil
   local signal_numbers = { SIGHUP = 1, SIGINT = 2, SIGILL = 4, SIGABRT = 6, SIGFPE = 8,
     SIGKILL = 9, SIGSEGV = 11, SIGPIPE = 13, SIGTERM = 15 }
+  local function add_fault_context(value, process)
+    if type(value) ~= "table" or not process or not process.cpu then return end
+    value.pid, value.rip = process.pid, process.cpu.rip
+    if config.debug_faults then
+      value.rflags = process.cpu.rflags
+      value.registers = {}
+      for index, name in ipairs(CPU.register_names) do
+        value.registers[name] = u64.hex(process.cpu.regs[index - 1])
+      end
+      value.processes = {}
+      for pid, item in pairs(kernel.world.processes) do
+        value.processes[#value.processes + 1] = { pid = pid, ppid = item.ppid, state = item.state,
+          rip = item.cpu and item.cpu.rip or nil }
+      end
+      table.sort(value.processes, function(a, b) return a.pid < b.pid end)
+    end
+  end
   local ok, fault = pcall(function()
     while kernel.state ~= "exited" and instructions < instruction_limit do
       local runnable = {}
@@ -68,6 +86,7 @@ function M.run(config)
           instructions, slice_count = instructions + 1, slice_count + 1
           if not step_ok then
             if type(step_fault) ~= "table" or step_fault.class ~= "guest_fault" then error(step_fault, 0) end
+            add_fault_context(step_fault, process)
             process:exit_process(128 + (signal_numbers[step_fault.signal] or 0),
               signal_numbers[step_fault.signal] or 0)
             if process == kernel then root_fault = step_fault end
@@ -89,6 +108,7 @@ function M.run(config)
   end)
   local elapsed = math.floor(platform.now_ms() - started)
   if not ok then
+    add_fault_context(fault, kernel)
     if type(fault) == "table" and fault.class == "guest_fault" then
       return { exit_code = nil, signal = fault.signal, fault = fault, instructions = cpu.instructions,
         syscalls = kernel.syscalls, elapsed_ms = elapsed }
