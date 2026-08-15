@@ -1,4 +1,4 @@
-.PHONY: all check check-craftos-pc check-differential check-guest-coverage check-upstream compatibility guest-root package bootstrap craftos-pc clean
+.PHONY: all check check-craftos-pc check-differential check-guest-coverage check-guest-syscalls check-upstream compatibility guest-root package bootstrap craftos-pc clean
 
 LUA ?= lua5.2
 
@@ -25,6 +25,9 @@ guest-root:
 
 check-guest-coverage: guest-root
 	./tools/check-guest-coverage.sh
+
+check-guest-syscalls: guest-root
+	./tools/check-guest-syscalls.sh
 
 check:
 	./tests/build-fixtures.sh

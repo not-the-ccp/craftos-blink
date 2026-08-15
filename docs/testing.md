@@ -24,6 +24,9 @@ Local validation is split deliberately:
 `make guest-root` reproducibly builds the pinned static dash/BusyBox target.
 `tools/inventory-elf.sh build/guest-root/bin/{dash,busybox}` inventories the
 complete statically disassembled mnemonic envelope before runtime testing.
+`make check-guest-syscalls` runs a deterministic native `strace` scenario over
+dash and BusyBox applets, then requires its syscall inventory to match the
+guest syscall status registry exactly.
 
 The generated compatibility registry is a public claim boundary. Differential
 and focused syscall tests are required in addition to a registry entry; planned
