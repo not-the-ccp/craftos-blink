@@ -11,7 +11,12 @@ local function result(cpu, value)
   cpu:set_reg(0, value < 0 and u64.from_signed(value) or u64.from_number(value), 64)
 end
 
-local function number(cpu, reg) return u64.to_number(cpu.regs[reg]) end
+local function number(cpu, reg)
+  local value = cpu.regs[reg]
+  if value[2] < 0x00200000 then return u64.to_number(value) end
+  if value[2] >= 0xffe00000 then return u64.to_signed_number(value) end
+  error("non-canonical syscall argument in register " .. tostring(reg), 0)
+end
 
 local function write_handle(handle, data)
   if (type(handle) == "table" or type(handle) == "userdata") and handle.write then
@@ -100,8 +105,11 @@ end
 
 function M:dispatch(cpu)
   local nr = cpu.regs[0][1]
-  local a1, a2, a3, a4, a5, a6 = number(cpu, 7), number(cpu, 6), number(cpu, 2),
-    number(cpu, 10), number(cpu, 8), number(cpu, 9)
+  local a1, a2, a3, a4, a5, a6 = 0, 0, 0, 0, 0, 0
+  if nr ~= 39 and nr ~= 110 and nr ~= 186 then
+    a1, a2, a3, a4, a5, a6 = number(cpu, 7), number(cpu, 6), number(cpu, 2),
+      number(cpu, 10), number(cpu, 8), number(cpu, 9)
+  end
   self.syscalls = self.syscalls + 1
   if self.trace then self.trace({ number = nr, args = { a1, a2, a3, a4, a5, a6 } }) end
 
@@ -154,8 +162,22 @@ function M:dispatch(cpu)
     result(cpu, ok and 0 or -errno.EINVAL)
   elseif nr == 11 then self.memory:unmap(a1 - a1 % 4096, math.ceil(a2 / 4096) * 4096); result(cpu, 0)
   elseif nr == 12 then
-    if a1 == 0 then result(cpu, self.brk) else self.brk = a1; result(cpu, self.brk) end
+    if a1 == 0 then result(cpu, self.brk)
+    else
+      local old_page = math.ceil(self.brk / Memory.PAGE_SIZE) * Memory.PAGE_SIZE
+      local new_page = math.ceil(a1 / Memory.PAGE_SIZE) * Memory.PAGE_SIZE
+      local ok = true
+      if new_page > old_page then
+        ok = pcall(function() self.memory:map(old_page, new_page - old_page,
+          Memory.PROT_READ + Memory.PROT_WRITE) end)
+      elseif new_page < old_page then
+        ok = pcall(function() self.memory:unmap(new_page, old_page - new_page) end)
+      end
+      if ok then self.brk = a1 end
+      result(cpu, self.brk)
+    end
   elseif nr == 39 or nr == 186 then result(cpu, self.pid)
+  elseif nr == 110 then result(cpu, 0)
   elseif nr == 60 or nr == 231 then
     self.exited, self.exit_code, cpu.halted = true, bit32.band(a1, 0xff), true; result(cpu, 0)
   elseif nr == 63 then

@@ -11,6 +11,7 @@ local tests = {
   "unit.cpu_test",
   "unit.vfs_test",
   "unit.elf_test",
+  "unit.kernel_test",
   "e2e.hello_test",
   "unit.registry_test",
 }

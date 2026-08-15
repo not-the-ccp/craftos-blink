@@ -52,6 +52,7 @@ function Reader:modrm()
     reg = reg, rm = rm, operand = operand }
   if mod == 3 then return info end
 
+  operand.segment = self.prefixes.segment
   operand.disp, operand.scale = 0, 1
   if rm_low == 4 then
     local sib = self:u8()
@@ -80,4 +81,3 @@ function M.operand_bits(reader, default64)
 end
 
 return M
-
