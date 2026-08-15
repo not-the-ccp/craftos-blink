@@ -40,8 +40,11 @@ pipe, `dup2`, `wait4`, and descriptor inheritance. It is intentionally **not**
 a claim of complete POSIX process support; signals, job control, blocking and
 error edge cases, and broader process semantics need separate focused tests.
 `make check-guest-syscalls` runs a deterministic native `strace` scenario over
-dash and BusyBox applets, then requires its syscall inventory to match the
-guest syscall status registry exactly.
+dash and every BusyBox applet listed in `config/busybox-applets.list`, then
+requires its syscall inventory to match the guest syscall status registry
+exactly. The scenario uses a private temporary directory and the pinned guest
+root, covering stream input/output, file creation/copy/move/removal, directory
+lifecycle, and timestamp/directory metadata paths.
 
 Focused kernel tests drive the x86-64 syscall ABI, rather than only internal
 helpers. They cover persistent regular-file writes and sparse gaps; shared

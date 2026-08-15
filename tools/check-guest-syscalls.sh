@@ -4,6 +4,7 @@ set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 root_dir=${1:-"$project_dir/build/guest-root"}
 status_file="$project_dir/config/guest-syscall-status.tsv"
+applets_file="$project_dir/config/busybox-applets.list"
 
 command -v strace >/dev/null 2>&1 || {
   echo "check-guest-syscalls: missing required command: strace" >&2
@@ -15,12 +16,17 @@ if [ ! -d "$root_dir" ]; then
   exit 1
 fi
 root_dir=$(CDPATH= cd -- "$root_dir" && pwd)
-for program in dash busybox cat mkdir ls uname; do
-  if [ ! -x "$root_dir/bin/$program" ]; then
-    echo "check-guest-syscalls: run make guest-root first (missing bin/$program)" >&2
+if [ ! -x "$root_dir/bin/dash" ]; then
+  echo "check-guest-syscalls: run make guest-root first (missing bin/dash)" >&2
+  exit 1
+fi
+while IFS= read -r applet_name; do
+  case "$applet_name" in ''|'#'*) continue ;; esac
+  if [ ! -x "$root_dir/bin/$applet_name" ]; then
+    echo "check-guest-syscalls: run make guest-root first (missing bin/$applet_name)" >&2
     exit 1
   fi
-done
+done < "$applets_file"
 
 temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "$temporary_dir"' EXIT HUP INT TERM
@@ -28,24 +34,41 @@ work_dir="$temporary_dir/work"
 mkdir "$work_dir"
 
 # Keep command names and files inside the pinned guest root and temporary
-# scenario directory. The shell builtin echo exercises the pipe; the remaining
-# commands are the copied BusyBox applets created by build-guest-root.sh.
+# scenario directory. Every applet in busybox-applets.list is invoked through
+# dash by its copied BusyBox pathname, so changing that list requires extending
+# this deterministic scenario too.
 LC_ALL=C TZ=UTC strace -f -qq -o "$temporary_dir/trace" -- "$root_dir/bin/dash" -c '
-  PATH=$1/bin
-  export PATH
+  set -e
   umask 022
-  echo inventory | cat > "$2/message"
+
   mkdir "$2/directory"
-  cat < "$2/message" > "$2/directory/copy"
-  ls "$2/directory" >/dev/null
-  uname >/dev/null
+  "$1/bin/printf" "first\\nsecond\\n" > "$2/directory/source"
+  "$1/bin/echo" inventory >> "$2/directory/source"
+  "$1/bin/cat" "$2/directory/source" > "$2/cat-copy"
+  "$1/bin/cp" "$2/cat-copy" "$2/directory/copy"
+  "$1/bin/mv" "$2/directory/copy" "$2/directory/moved"
+  "$1/bin/touch" "$2/directory/moved"
+
+  "$1/bin/printf" "stream\\n" | "$1/bin/cat" > "$2/stream"
+  "$1/bin/env" -i PATH="$1/bin" "$1/bin/true"
+  if "$1/bin/false"; then exit 1; fi
+  "$1/bin/head" -n 1 "$2/directory/source" >/dev/null
+  "$1/bin/tail" -n 1 "$2/directory/source" >/dev/null
+  "$1/bin/test" -f "$2/directory/moved"
+  (cd "$2" && "$1/bin/pwd" >/dev/null)
+  "$1/bin/ls" "$2/directory" >/dev/null
+  "$1/bin/ls" -ld "$2/directory" >/dev/null
+  "$1/bin/uname" -s >/dev/null
+  "$1/bin/wc" -l "$2/directory/source" >/dev/null
+
+  "$1/bin/rm" "$2/cat-copy" "$2/stream" "$2/directory/source" "$2/directory/moved"
+  "$1/bin/rmdir" "$2/directory"
 ' dash "$root_dir" "$work_dir"
 
 awk '
   {
     line = $0
-    sub(/^\[pid [0-9]+\] /, "", line)
-    sub(/^[0-9]+ /, "", line)
+    sub(/^[[:space:]]*(\[pid [[:digit:]]+\]|[[:digit:]]+)[[:space:]]+/, "", line)
     if (line ~ /^[[:alpha:]_][[:alnum:]_]*\(/) {
       sub(/\(.*/, "", line)
       print line
