@@ -24,6 +24,12 @@ Local validation is split deliberately:
 `make guest-root` reproducibly builds the pinned static dash/BusyBox target.
 `tools/inventory-elf.sh build/guest-root/bin/{dash,busybox}` inventories the
 complete statically disassembled mnemonic envelope before runtime testing.
+`make check-guest-filesystem` copies that root into a private temporary
+directory, then checks the supported single-process dash builtin filesystem
+path: `cd`/`pwd`, `test`, redirection, builtin `read`, append, and a failed
+`cd`. It verifies both exact guest stdout and the resulting host file. It
+deliberately does **not** execute BusyBox applets, pipelines, or other external
+commands; those require the still-incomplete process/exec layer.
 `make check-guest-syscalls` runs a deterministic native `strace` scenario over
 dash and BusyBox applets, then requires its syscall inventory to match the
 guest syscall status registry exactly.
