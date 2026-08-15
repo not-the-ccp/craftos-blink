@@ -19,18 +19,35 @@ hardware emulation, and blinkenlights debugger UI are outside this project.
   never report success.
 - The POSIX adapter canonicalizes paths and rejects resolved host-symlink
   escapes. ComputerCraft uses its native, symlink-free filesystem adapter.
+- File descriptors refer to open-file descriptions. `dup`/`dup2` and the
+  supported `fcntl` duplication operations share an offset and status flags;
+  descriptor-local close-on-exec flags remain separate.
+- Regular-file writes are committed to the guest VFS before `write`/`writev`
+  returns. Live descriptions of the same path consequently observe truncation
+  and writes immediately.
 - The single-process VM yields after an instruction or time slice and never
   assumes native Lua threads.
 
 ## Alpha gaps
 
-The process scheduler, persistent POSIX metadata, directory/file mutation
-layer, signals delivery, and copy-on-write process address spaces remain under
-construction. REP instructions are not yet chunked within a single CPU step.
-The POSIX adapter prevents ordinary resolved symlink escapes, but it is not a
-native `openat(2)` sandbox and cannot close races caused by a concurrently
-mutating host filesystem. Do not expose an untrusted host tree as the guest
-root.
+The VFS has a deliberately small metadata model: `stat`/`fstat`/`newfstatat`
+report synthetic device, inode, mode, size, block-size, and block-count fields.
+Creation modes and `umask` state are accepted but are not yet enforced, and
+timestamps, ownership, links, and durable sidecar POSIX metadata are absent.
+
+`open`/`openat` support access mode plus `O_CREAT`, `O_EXCL`, `O_TRUNC`,
+`O_APPEND`, `O_DIRECTORY`, and `O_CLOEXEC`; the final flag is recorded for the
+future `execve` implementation. Relative `openat` requires an open directory
+descriptor. Directory reads use bounded `getdents64` records, while `/dev/null`
+and `/dev/zero` have their normal discard/EOF and zero-read behavior. Guest I/O
+requests are bounded to prevent a single syscall from exhausting host memory.
+
+There is no pipe, `fork`/`clone`, `execve`, `wait`, or cooperative process model
+yet, so descriptor inheritance and close-on-exec behavior are not active. REP
+instructions are not yet chunked within a single CPU step. The POSIX adapter
+prevents ordinary resolved symlink escapes, but it is not a race-proof native
+`openat(2)` sandbox and cannot close races caused by a concurrently mutating
+host filesystem. Do not expose an untrusted host tree as the guest root.
 
 The compatibility registry distinguishes complete, partial, planned, and
 faulting facilities. Only `implemented` entries are release claims.

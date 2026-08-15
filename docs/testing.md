@@ -28,6 +28,15 @@ complete statically disassembled mnemonic envelope before runtime testing.
 dash and BusyBox applets, then requires its syscall inventory to match the
 guest syscall status registry exactly.
 
+Focused kernel tests drive the x86-64 syscall ABI, rather than only internal
+helpers. They cover persistent regular-file writes and sparse gaps; shared
+offsets after `dup`/`dup2`; the implemented `fcntl` descriptor/status flag
+subset; `O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, and `O_CLOEXEC` state;
+relative `openat`; synthetic `stat` fields; bounded `read`/`write`/`writev`;
+directory `getdents64`; and `/dev/null` and `/dev/zero`. These tests do not
+claim pipe, process, or exec semantics, which remain outside the current
+milestone.
+
 The generated compatibility registry is a public claim boundary. Differential
 and focused syscall tests are required in addition to a registry entry; planned
 and partial features are not advertised as implemented.
