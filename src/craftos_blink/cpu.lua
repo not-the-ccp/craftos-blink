@@ -213,6 +213,36 @@ end
 local group_kinds = { [0] = "add", [1] = "or", [2] = "adc", [3] = "sbb",
   [4] = "and", [5] = "sub", [6] = "xor", [7] = "cmp" }
 
+local function valid_lock_encoding(memory, start)
+  local reader = decoder.reader(memory, start)
+  reader:prefixes64()
+  local opcode = reader:u8()
+  local direct = opcode == 0x00 or opcode == 0x01 or opcode == 0x08 or opcode == 0x09
+    or opcode == 0x10 or opcode == 0x11 or opcode == 0x18 or opcode == 0x19
+    or opcode == 0x20 or opcode == 0x21 or opcode == 0x28 or opcode == 0x29
+    or opcode == 0x30 or opcode == 0x31
+  if direct then return reader:modrm().operand.kind == "mem" end
+  if opcode == 0x80 or opcode == 0x81 or opcode == 0x83 then
+    local mr = reader:modrm()
+    return mr.operand.kind == "mem" and mr.opcode ~= 7
+  end
+  if opcode == 0xf6 or opcode == 0xf7 then
+    local mr = reader:modrm()
+    return mr.operand.kind == "mem" and (mr.opcode == 2 or mr.opcode == 3)
+  end
+  if opcode == 0xff then
+    local mr = reader:modrm()
+    return mr.operand.kind == "mem" and (mr.opcode == 0 or mr.opcode == 1)
+  end
+  if opcode == 0x0f then
+    local second = reader:u8()
+    if second == 0xb0 or second == 0xb1 or second == 0xc0 or second == 0xc1 then
+      return reader:modrm().operand.kind == "mem"
+    end
+  end
+  return false
+end
+
 function M:step()
   local start = self.rip
   local r = decoder.reader(self.memory, start)
@@ -221,10 +251,11 @@ function M:step()
   local bits = decoder.operand_bits(r, false)
   local mnemonic = "?"
 
-  -- Atomic read-modify-write semantics are not available until the cooperative
-  -- process scheduler exists. Never silently execute a LOCKed instruction as
-  -- an ordinary non-atomic operation.
-  if r.prefixes.lock then guest_fault(self, "SIGILL", "ILL_ILLOPN") end
+  -- A CPU step never yields, so valid locked memory RMW forms are atomic with
+  -- respect to the cooperative scheduler. Invalid/register LOCK forms #UD.
+  if r.prefixes.lock and not valid_lock_encoding(self.memory, start) then
+    guest_fault(self, "SIGILL", "ILL_ILLOPN")
+  end
 
   if op >= 0x50 and op <= 0x57 then
     local reg = op - 0x50 + (bit32.band(r.rex, 1) ~= 0 and 8 or 0)
@@ -269,7 +300,14 @@ function M:step()
       or (op == 0x3c or op == 0x3d) and "cmp" or "test"
     self:binary(kind, { kind = "reg", reg = 0 }, u64.from_signed(imm), width, r.pos)
     mnemonic = kind
-  elseif op == 0x90 then mnemonic = "nop"
+  elseif op >= 0x90 and op <= 0x97 then
+    if op ~= 0x90 or r.rex_present then
+      local reg = op - 0x90 + (bit32.band(r.rex, 1) ~= 0 and 8 or 0)
+      local accumulator = self:get_reg(0, bits)
+      self:set_reg(0, self:get_reg(reg, bits), bits)
+      self:set_reg(reg, accumulator, bits)
+      mnemonic = "xchg"
+    else mnemonic = r.prefixes.rep and "pause" or "nop" end
   elseif op == 0x9c then self:push(u64.from_number(self.rflags)); mnemonic = "pushf"
   elseif op == 0x9d then
     local value = self:pop()[1]
@@ -295,6 +333,13 @@ function M:step()
   elseif op == 0xeb then local d = r:i8(); r.pos = r.pos + d; mnemonic = "jmp"
   elseif op >= 0x70 and op <= 0x7f then
     local d = r:i8(); if flags.condition(op - 0x70, self.rflags) then r.pos = r.pos + d end; mnemonic = "jcc"
+  elseif op == 0x86 or op == 0x87 then
+    local mr = r:modrm(); local width = op == 0x86 and 8 or bits
+    local left, right = self:read_operand(mr.operand, width, r.pos),
+      self:read_operand(mr.reg_operand, width, r.pos)
+    self:write_operand(mr.operand, right, width, r.pos)
+    self:write_operand(mr.reg_operand, left, width, r.pos)
+    mnemonic = "xchg"
   elseif op == 0x88 or op == 0x89 or op == 0x8a or op == 0x8b then
     local mr = r:modrm(); local width = (op == 0x88 or op == 0x8a) and 8 or bits
     local regop = mr.reg_operand
@@ -620,6 +665,72 @@ function M:step()
       self:set_multiply_flags(overflow)
       self:set_reg(mr.reg, mask(result_value, bits), bits)
       mnemonic = "imul"
+    elseif op2 == 0xbc then
+      local mr = r:modrm()
+      local source = self:read_operand(mr.operand, bits, r.pos)
+      self.rflags = bit32.band(self.rflags, bit32.bnot(flags.ZF))
+      if u64.is_zero(source) then self.rflags = bit32.bor(self.rflags, flags.ZF)
+      else
+        local index = 0
+        while u64.bit(source, index) == 0 do index = index + 1 end
+        self:set_reg(mr.reg, u64.from_number(index), bits)
+      end
+      mnemonic = "bsf"
+    elseif op2 >= 0xc8 and op2 <= 0xcf then
+      local reg = op2 - 0xc8 + (bit32.band(r.rex, 1) ~= 0 and 8 or 0)
+      local value = self:get_reg(reg, bits)
+      local function swap32(word)
+        return bit32.bor(bit32.lshift(bit32.band(word, 0xff), 24),
+          bit32.lshift(bit32.band(bit32.rshift(word, 8), 0xff), 16),
+          bit32.lshift(bit32.band(bit32.rshift(word, 16), 0xff), 8), bit32.rshift(word, 24))
+      end
+      local swapped = bits == 64 and u64.new(swap32(value[2]), swap32(value[1])) or u64.new(swap32(value[1]), 0)
+      self:set_reg(reg, swapped, bits); mnemonic = "bswap"
+    elseif op2 == 0xc0 or op2 == 0xc1 then
+      local mr = r:modrm(); local width = op2 == 0xc0 and 8 or bits
+      local old_destination = self:read_operand(mr.operand, width, r.pos)
+      local source = self:read_operand(mr.reg_operand, width, r.pos)
+      local result_value = mask(u64.add(old_destination, source), width)
+      self:set_arithmetic_flags("add", old_destination, source, result_value, width)
+      self:write_operand(mr.operand, result_value, width, r.pos)
+      self:write_operand(mr.reg_operand, old_destination, width, r.pos)
+      mnemonic = "xadd"
+    elseif op2 == 0xb0 or op2 == 0xb1 then
+      local mr = r:modrm(); local width = op2 == 0xb0 and 8 or bits
+      local destination = self:read_operand(mr.operand, width, r.pos)
+      local accumulator = self:get_reg(0, width)
+      self:binary("cmp", { kind = "reg", reg = 0 }, destination, width, r.pos, false)
+      if bit32.band(self.rflags, flags.ZF) ~= 0 then
+        self:write_operand(mr.operand, self:read_operand(mr.reg_operand, width, r.pos), width, r.pos)
+      else self:set_reg(0, destination, width) end
+      mnemonic = "cmpxchg"
+    elseif op2 == 0xa4 or op2 == 0xa5 or op2 == 0xac or op2 == 0xad then
+      local mr = r:modrm()
+      local count = (op2 == 0xa4 or op2 == 0xac) and r:u8() or bit32.band(self.regs[1][1], 0xff)
+      count = count % (bits == 64 and 64 or 32)
+      if count ~= 0 then
+        local destination = mask(self:read_operand(mr.operand, bits, r.pos), bits)
+        local source = mask(self:read_operand(mr.reg_operand, bits, r.pos), bits)
+        local result_value, carry, overflow
+        if op2 == 0xa4 or op2 == 0xa5 then
+          result_value = mask(u64.bor(u64.shl(destination, count), u64.shr(source, bits - count)), bits)
+          carry = u64.bit(destination, bits - count) ~= 0
+          overflow = count == 1 and (sign(result_value, bits) ~= carry)
+          mnemonic = "shld"
+        else
+          result_value = mask(u64.bor(u64.shr(destination, count), u64.shl(source, bits - count)), bits)
+          carry = u64.bit(destination, count - 1) ~= 0
+          overflow = count == 1 and (sign(destination, bits) ~= sign(result_value, bits))
+          mnemonic = "shrd"
+        end
+        local replace_mask = bit32.bor(flags.CF, flags.PF, flags.ZF, flags.SF)
+        if count == 1 then replace_mask = bit32.bor(replace_mask, flags.OF) end
+        local new_flags = flags.logic(result_value, bits)
+        if carry then new_flags = bit32.bor(new_flags, flags.CF) end
+        if count == 1 and overflow then new_flags = bit32.bor(new_flags, flags.OF) end
+        self.rflags = bit32.bor(bit32.band(self.rflags, bit32.bnot(replace_mask)), new_flags, 2)
+        self:write_operand(mr.operand, result_value, bits, r.pos)
+      else mnemonic = (op2 == 0xa4 or op2 == 0xa5) and "shld" or "shrd" end
     elseif op2 == 0xa3 then
       local mr = r:modrm()
       local index = self:get_reg(mr.reg, bits)[1] % bits

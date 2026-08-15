@@ -87,6 +87,40 @@ _start:
   idiv %rcx
   snapshot 13, 0
 
+  mov $0x100, %rdx
+  bsf %rdx, %rax
+  snapshot 14, 0x40
+
+  movabs $0x1122334455667788, %rax
+  bswap %rax
+  snapshot 15, 0
+
+  mov $5, %rax
+  mov $7, %rdx
+  xchg %rax, %rdx
+  snapshot 16, 0
+
+  mov $5, %rax
+  mov $7, %rdx
+  xadd %rdx, %rax
+  snapshot 17, 0xcd5
+
+  mov $5, %rax
+  mov $5, %rdx
+  mov $9, %rcx
+  cmpxchg %rcx, %rdx
+  snapshot 18, 0xcd5
+
+  movabs $0x8000000000000000, %rax
+  mov $1, %rdx
+  shld $1, %rdx, %rax
+  snapshot 19, 0x8c5
+
+  mov $1, %rax
+  movabs $0x8000000000000000, %rdx
+  shrd $1, %rdx, %rax
+  snapshot 20, 0x8c5
+
   mov $1, %eax
   mov $1, %edi
   lea snapshots(%rip), %rsi

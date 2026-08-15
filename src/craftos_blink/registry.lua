@@ -5,8 +5,10 @@ local M = {}
 M.instructions = {
   { name = "ADD", encoding = "01/03/81.0/83.0", status = "implemented", class = "integer" },
   { name = "AND", encoding = "21/23/81.4/83.4", status = "implemented", class = "integer" },
+  { name = "BSF/BSWAP", encoding = "0F BC/0F C8-CF", status = "implemented", class = "integer" },
   { name = "CALL", encoding = "E8/FF.2", status = "implemented", class = "control" },
   { name = "CMP", encoding = "39/3B/81.7/83.7", status = "implemented", class = "integer" },
+  { name = "CMPXCHG/XADD/XCHG", encoding = "0F B0-B1/0F C0-C1/86-87/90-97", status = "implemented", class = "atomic" },
   { name = "CPUID", encoding = "0F A2", status = "implemented", class = "system" },
   { name = "ENDBR64", encoding = "F3 0F 1E FA", status = "implemented", class = "control" },
   { name = "IMUL", encoding = "0F AF/69/6B", status = "implemented", class = "integer" },
@@ -21,6 +23,7 @@ M.instructions = {
   { name = "POP", encoding = "58-5F", status = "implemented", class = "stack" },
   { name = "PUSH", encoding = "50-57/68/6A/FF.6", status = "implemented", class = "stack" },
   { name = "RET", encoding = "C3", status = "implemented", class = "control" },
+  { name = "SHLD/SHRD", encoding = "0F A4-A5/0F AC-AD", status = "implemented", class = "integer" },
   { name = "SUB", encoding = "29/2B/81.5/83.5", status = "implemented", class = "integer" },
   { name = "SYSCALL", encoding = "0F 05", status = "implemented", class = "system" },
   { name = "TEST", encoding = "85/F7.0", status = "implemented", class = "integer" },

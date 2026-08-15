@@ -3,8 +3,10 @@
   "instructions": [
     {"name": "ADD", "encoding": "01/03/81.0/83.0", "class": "integer", "status": "implemented"},
     {"name": "AND", "encoding": "21/23/81.4/83.4", "class": "integer", "status": "implemented"},
+    {"name": "BSF/BSWAP", "encoding": "0F BC/0F C8-CF", "class": "integer", "status": "implemented"},
     {"name": "CALL", "encoding": "E8/FF.2", "class": "control", "status": "implemented"},
     {"name": "CMP", "encoding": "39/3B/81.7/83.7", "class": "integer", "status": "implemented"},
+    {"name": "CMPXCHG/XADD/XCHG", "encoding": "0F B0-B1/0F C0-C1/86-87/90-97", "class": "atomic", "status": "implemented"},
     {"name": "CPUID", "encoding": "0F A2", "class": "system", "status": "implemented"},
     {"name": "ENDBR64", "encoding": "F3 0F 1E FA", "class": "control", "status": "implemented"},
     {"name": "IMUL", "encoding": "0F AF/69/6B", "class": "integer", "status": "implemented"},
@@ -19,6 +21,7 @@
     {"name": "POP", "encoding": "58-5F", "class": "stack", "status": "implemented"},
     {"name": "PUSH", "encoding": "50-57/68/6A/FF.6", "class": "stack", "status": "implemented"},
     {"name": "RET", "encoding": "C3", "class": "control", "status": "implemented"},
+    {"name": "SHLD/SHRD", "encoding": "0F A4-A5/0F AC-AD", "class": "integer", "status": "implemented"},
     {"name": "SUB", "encoding": "29/2B/81.5/83.5", "class": "integer", "status": "implemented"},
     {"name": "SYSCALL", "encoding": "0F 05", "class": "system", "status": "implemented"},
     {"name": "TEST", "encoding": "85/F7.0", "class": "integer", "status": "implemented"},

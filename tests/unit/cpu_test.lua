@@ -239,6 +239,13 @@ local lock_fault = t.raises(function()
 end, function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(lock_fault.code, "ILL_ILLOPN", "LOCK rejected until atomic semantics exist")
 
+m:write(0x1480, "\240\131\4\36\0") -- lock addl $0,(rsp)
+cpu.rip = 0x1480
+cpu:set_reg(4, u.from_number(0x8400), 64)
+m:write_u32(0x8400, 0x12345678)
+cpu:step()
+t.eq(m:read_u32(0x8400), 0x12345678, "valid LOCKed memory RMW")
+
 local fault = t.raises(function() cpu.rip = 0x1120; m:write8(0x1120, 0xf4); cpu:step() end,
   function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(fault.address, 0x1120)

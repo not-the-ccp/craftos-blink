@@ -8,8 +8,10 @@ This file is generated from `src/craftos_blink/registry.lua`. A feature is suppo
 |---|---|---|---|
 | ADD | `01/03/81.0/83.0` | integer | **implemented** |
 | AND | `21/23/81.4/83.4` | integer | **implemented** |
+| BSF/BSWAP | `0F BC/0F C8-CF` | integer | **implemented** |
 | CALL | `E8/FF.2` | control | **implemented** |
 | CMP | `39/3B/81.7/83.7` | integer | **implemented** |
+| CMPXCHG/XADD/XCHG | `0F B0-B1/0F C0-C1/86-87/90-97` | atomic | **implemented** |
 | CPUID | `0F A2` | system | **implemented** |
 | ENDBR64 | `F3 0F 1E FA` | control | **implemented** |
 | IMUL | `0F AF/69/6B` | integer | **implemented** |
@@ -24,6 +26,7 @@ This file is generated from `src/craftos_blink/registry.lua`. A feature is suppo
 | POP | `58-5F` | stack | **implemented** |
 | PUSH | `50-57/68/6A/FF.6` | stack | **implemented** |
 | RET | `C3` | control | **implemented** |
+| SHLD/SHRD | `0F A4-A5/0F AC-AD` | integer | **implemented** |
 | SUB | `29/2B/81.5/83.5` | integer | **implemented** |
 | SYSCALL | `0F 05` | system | **implemented** |
 | TEST | `85/F7.0` | integer | **implemented** |
