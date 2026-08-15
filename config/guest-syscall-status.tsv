@@ -2,10 +2,10 @@ arch_prctl	implemented
 brk	implemented
 close	implemented
 dup2	implemented
-execve	planned
+execve	partial
 exit_group	implemented
 fcntl	partial
-fork	planned
+fork	partial
 getdents64	partial
 geteuid	implemented
 getpid	implemented
@@ -16,7 +16,7 @@ mkdir	partial
 mmap	partial
 munmap	implemented
 open	partial
-pipe	planned
+pipe	partial
 read	partial
 rt_sigaction	partial
 rt_sigprocmask	partial
@@ -25,7 +25,7 @@ set_tid_address	implemented
 stat	partial
 umask	partial
 uname	implemented
-vfork	planned
-wait4	planned
+vfork	partial
+wait4	partial
 write	partial
 writev	partial

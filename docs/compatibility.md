@@ -66,7 +66,7 @@ This file is generated from `src/craftos_blink/registry.lua`. A feature is suppo
 | 17 | `pread64` | **planned** |
 | 20 | `writev` | **bounded-fd-subset** |
 | 21 | `access` | **path-subset** |
-| 22 | `pipe` | **planned** |
+| 22 | `pipe` | **cooperative-subset** |
 | 32 | `dup` | **implemented** |
 | 33 | `dup2` | **implemented** |
 | 39 | `getpid` | **implemented** |
@@ -74,10 +74,11 @@ This file is generated from `src/craftos_blink/registry.lua`. A feature is suppo
 | 41 | `socket` | **local-only** |
 | 53 | `socketpair` | **planned** |
 | 56 | `clone` | **planned** |
-| 57 | `fork` | **planned** |
-| 59 | `execve` | **planned** |
+| 57 | `fork` | **cooperative-subset** |
+| 58 | `vfork` | **fork-semantics** |
+| 59 | `execve` | **ELF-subset** |
 | 60 | `exit` | **implemented** |
-| 61 | `wait4` | **planned** |
+| 61 | `wait4` | **child-subset** |
 | 62 | `kill` | **planned** |
 | 63 | `uname` | **implemented** |
 | 72 | `fcntl` | **descriptor-subset** |

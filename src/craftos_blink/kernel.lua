@@ -1,12 +1,15 @@
 local u64 = require("craftos_blink.u64")
 local Memory = require("craftos_blink.memory")
+local CPU = require("craftos_blink.cpu")
+local ELF = require("craftos_blink.elf")
 
 local M = {}
 M.__index = M
 
-local errno = { EPERM = 1, ENOENT = 2, EIO = 5, EBADF = 9, EAGAIN = 11, EACCES = 13,
+local errno = { EPERM = 1, ENOENT = 2, EIO = 5, E2BIG = 7, ENOEXEC = 8, EBADF = 9,
+  ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EACCES = 13,
   EFAULT = 14, EEXIST = 17, ENOTDIR = 20, EISDIR = 21, EINVAL = 22, ENFILE = 23,
-  EMFILE = 24, ENOTTY = 25, ESPIPE = 29, ERANGE = 34, ENOSYS = 38,
+  EMFILE = 24, ENOTTY = 25, ESPIPE = 29, EPIPE = 32, ERANGE = 34, ENOSYS = 38,
   EAFNOSUPPORT = 97, ENETDOWN = 100 }
 
 local O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC = 3, 0x40, 0x80, 0x200
@@ -28,7 +31,8 @@ end
 local syscall_argc = {
   [0] = 3, [1] = 3, [2] = 3, [3] = 1, [4] = 2, [5] = 2, [6] = 2, [8] = 3,
   [9] = 6, [10] = 3, [11] = 2, [12] = 1, [13] = 4, [14] = 4, [16] = 3,
-  [20] = 3, [21] = 2, [32] = 1, [33] = 2, [39] = 0, [41] = 3, [60] = 1,
+  [20] = 3, [21] = 2, [22] = 1, [32] = 1, [33] = 2, [39] = 0, [41] = 3,
+  [56] = 5, [57] = 0, [58] = 0, [59] = 3, [60] = 1, [61] = 4,
   [63] = 1, [72] = 3, [78] = 3, [79] = 2, [80] = 1, [83] = 2, [89] = 3,
   [95] = 1, [107] = 0, [110] = 0, [158] = 2, [186] = 0, [217] = 3,
   [218] = 1, [228] = 2, [231] = 1, [257] = 4, [262] = 4, [273] = 2, [318] = 3,
@@ -75,10 +79,14 @@ end
 
 function M.new(memory, vfs, options)
   options = options or {}
-  local self = setmetatable({ memory = memory, vfs = vfs, pid = 1, syscalls = 0,
+  local world = options.world or { processes = {}, next_pid = 2, file_nodes = {}, syscalls = 0 }
+  if options.max_processes then world.max_processes = options.max_processes end
+  local self = setmetatable({ memory = memory, vfs = vfs, pid = options.pid or 1,
+    ppid = options.ppid or 0, world = world, state = "runnable", syscalls = 0,
     exited = false, exit_code = nil, brk = options.brk or 0x70000000,
     mmap_next = options.mmap_base or 0x71000000, seed = options.seed or 0x4b1d,
-    trace = options.trace, fds = {}, file_nodes = {}, signal_actions = {}, signal_mask = u64.zero(),
+    trace = options.trace, instruction_trace = options.instruction_trace, fds = {},
+    file_nodes = world.file_nodes, signal_actions = {}, signal_mask = u64.zero(),
     file_creation_mask = 0x12, io_limit = options.io_limit or DEFAULT_IO_LIMIT }, M)
   local host_io = type(io) == "table" and io or {}
   local stdin = options.stdin
@@ -88,9 +96,18 @@ function M.new(memory, vfs, options)
       return line ~= nil and line .. "\n" or nil
     end
   end
-  self.fds[0] = { description = { kind = "stdio", handle = stdin or host_io.stdin, readable = true, refs = 1 } }
-  self.fds[1] = { description = { kind = "stdio", handle = options.stdout or host_io.stdout, writable = true, refs = 1 } }
-  self.fds[2] = { description = { kind = "stdio", handle = options.stderr or host_io.stderr, writable = true, refs = 1 } }
+  if not options.skip_stdio then
+    self.fds[0] = { description = { kind = "stdio", handle = stdin or host_io.stdin, readable = true, refs = 1 } }
+    self.fds[1] = { description = { kind = "stdio", handle = options.stdout or host_io.stdout, writable = true, refs = 1 } }
+    self.fds[2] = { description = { kind = "stdio", handle = options.stderr or host_io.stderr, writable = true, refs = 1 } }
+  end
+  return self
+end
+
+function M:attach_cpu(cpu)
+  self.cpu = cpu
+  self.world.processes[self.pid] = self
+  if not self.world.root then self.world.root = self end
   return self
 end
 
@@ -123,6 +140,12 @@ function M:close(fd)
   if not entry then return nil, "EBADF" end
   self.fds[fd] = nil
   entry.description.refs = entry.description.refs - 1
+  if entry.description.refs == 0 and entry.description.pipe then
+    local pipe = entry.description.pipe
+    if entry.description.kind == "pipe_read" then pipe.readers = pipe.readers - 1
+    else pipe.writers = pipe.writers - 1 end
+    self:wake_pipe(pipe)
+  end
   return true
 end
 
@@ -202,6 +225,12 @@ function M:write_fd(fd_number, data)
   local fd = entry.description
   if fd.kind == "stdio" then write_handle(fd.handle, data); return #data end
   if fd.kind == "null" or fd.kind == "zero" then return #data end
+  if fd.kind == "pipe_write" then
+    if fd.pipe.readers == 0 then return nil, "EPIPE" end
+    fd.pipe.data = fd.pipe.data .. data
+    self:wake_pipe(fd.pipe)
+    return #data
+  end
   if fd.kind == "directory" then return nil, "EBADF" end
   if fd.kind ~= "file" then return nil, "EINVAL" end
   local current = fd.node.data
@@ -229,6 +258,14 @@ function M:read_fd(fd_number, count)
     return ""
   elseif fd.kind == "directory" then
     return nil, "EISDIR"
+  elseif fd.kind == "pipe_read" then
+    if #fd.pipe.data > 0 then
+      local data = fd.pipe.data:sub(1, count)
+      fd.pipe.data = fd.pipe.data:sub(#data + 1)
+      return data
+    end
+    if fd.pipe.writers == 0 then return "" end
+    return nil, "EAGAIN"
   end
   return read_handle(fd, count)
 end
@@ -293,12 +330,211 @@ function M:getdents64(fd_number, address, count)
   return written
 end
 
-function M:dispatch(cpu)
+local function copy_signal_actions(actions)
+  local copied = {}
+  for signal, action in pairs(actions) do
+    copied[signal] = { u64.clone(action[1]), u64.clone(action[2]),
+      u64.clone(action[3]), u64.clone(action[4]) }
+  end
+  return copied
+end
+
+local function mapping_text(memory)
+  local out = {}
+  for _, map in ipairs(memory:mappings()) do
+    out[#out + 1] = string.format("%012x-%012x %s%s%sp 00000000 00:00 0\n", map.address,
+      map.address + Memory.PAGE_SIZE, bit32.band(map.prot, 1) ~= 0 and "r" or "-",
+      bit32.band(map.prot, 2) ~= 0 and "w" or "-", bit32.band(map.prot, 4) ~= 0 and "x" or "-")
+  end
+  return table.concat(out)
+end
+
+function M:update_proc_state()
+  self.vfs.pid = self.pid
+  self.vfs.maps_text = function() return mapping_text(self.memory) end
+end
+
+function M:fork_process(cpu, next_rip)
+  local count = 0
+  for _ in pairs(self.world.processes) do count = count + 1 end
+  if self.world.max_processes and count >= self.world.max_processes then return nil, "EAGAIN" end
+  local pid = self.world.next_pid
+  self.world.next_pid = pid + 1
+  local child_memory, child_vfs = self.memory:fork(), self.vfs:clone()
+  local child = M.new(child_memory, child_vfs, { world = self.world, pid = pid, ppid = self.pid,
+    brk = self.brk, mmap_base = self.mmap_next, seed = self.seed, trace = self.trace,
+    instruction_trace = self.instruction_trace, io_limit = self.io_limit, skip_stdio = true })
+  child.file_creation_mask = self.file_creation_mask
+  child.signal_mask = u64.clone(self.signal_mask)
+  child.signal_actions = copy_signal_actions(self.signal_actions)
+  for fd, entry in pairs(self.fds) do
+    entry.description.refs = entry.description.refs + 1
+    child.fds[fd] = { description = entry.description, cloexec = entry.cloexec }
+  end
+
+  local child_cpu
+  child_cpu = CPU.new(child_memory, { rip = next_rip, trace = self.instruction_trace,
+    syscall = function(current, return_rip) return child:dispatch(current, return_rip) end })
+  for reg = 0, 15 do
+    child_cpu.regs[reg] = u64.clone(cpu.regs[reg])
+    local xmm = cpu.xmm[reg]
+    child_cpu.xmm[reg] = { xmm[1], xmm[2], xmm[3], xmm[4] }
+  end
+  child_cpu.rip, child_cpu.rflags = next_rip, cpu.rflags
+  child_cpu.fs_base, child_cpu.gs_base = cpu.fs_base, cpu.gs_base
+  result(child_cpu, 0)
+  child:attach_cpu(child_cpu)
+  child:update_proc_state()
+  return pid
+end
+
+function M:read_string_vector(address, maximum)
+  if address == 0 then return {} end
+  local values, total = {}, 0
+  for index = 0, (maximum or 4096) - 1 do
+    local pointer = self.memory:read_u64(address + index * 8)
+    if pointer[1] == 0 and pointer[2] == 0 then return values end
+    if pointer[2] >= 0x00200000 then return nil, "EFAULT" end
+    local value = self:cstring(u64.to_number(pointer), 4096)
+    if not value then return nil, "EFAULT" end
+    total = total + #value + 1
+    if total > self.io_limit then return nil, "E2BIG" end
+    values[#values + 1] = value
+  end
+  return nil, "E2BIG"
+end
+
+function M:execve(cpu, path, argv_address, env_address)
+  local argv, argv_error = self:read_string_vector(argv_address)
+  if not argv then return nil, argv_error end
+  local environment, env_error = self:read_string_vector(env_address)
+  if not environment then return nil, env_error end
+  if #argv == 0 then argv[1] = path end
+  local memory = Memory.new({ max_pages = self.memory.max_pages })
+  local vfs = self.vfs:clone()
+  local ok, loaded = pcall(ELF.load, memory, vfs, path, { argv = argv, env = environment })
+  if not ok then
+    if type(loaded) == "table" and loaded.class == "host_configuration" then
+      return nil, loaded.code == "EACCES" and "EACCES" or "ENOENT"
+    end
+    return nil, type(loaded) == "table" and loaded.class == "resource_limit" and "ENOMEM" or "ENOEXEC"
+  end
+
+  local closing = {}
+  for fd, entry in pairs(self.fds) do if entry.cloexec then closing[#closing + 1] = fd end end
+  for _, fd in ipairs(closing) do self:close(fd) end
+  self.memory, self.vfs = memory, vfs
+  self.brk, self.mmap_next = 0x70000000, 0x71000000
+  self.signal_actions = {}
+  cpu.memory, cpu.regs, cpu.xmm = memory, {}, {}
+  for reg = 0, 15 do cpu.regs[reg], cpu.xmm[reg] = u64.zero(), { 0, 0, 0, 0 } end
+  cpu.rip, cpu.rflags, cpu.fs_base, cpu.gs_base, cpu.halted = loaded.entry, 2, 0, 0, false
+  cpu:set_reg(4, u64.from_number(loaded.stack), 64)
+  self:update_proc_state()
+  return true
+end
+
+local function child_matches(parent, child, requested)
+  return child.ppid == parent.pid and (requested == -1 or requested == child.pid)
+end
+
+function M:reap_child(child, status_address)
+  if status_address ~= 0 then
+    local status = child.term_signal_number or bit32.lshift(bit32.band(child.exit_code or 0, 0xff), 8)
+    self.memory:write_u32(status_address, status)
+  end
+  self.world.processes[child.pid] = nil
+  return child.pid
+end
+
+function M:wait4(cpu, requested, status_address, options)
+  local matching, exited
+  for _, child in pairs(self.world.processes) do
+    if child_matches(self, child, requested) then
+      matching = child
+      if child.state == "exited" then exited = child; break end
+    end
+  end
+  if exited then return self:reap_child(exited, status_address) end
+  if not matching then return nil, "ECHILD" end
+  if bit32.band(options, 1) ~= 0 then return 0 end
+  self.state = "blocked"
+  self.wait_request = { kind = "wait4", requested = requested, status = status_address, cpu = cpu }
+  return false
+end
+
+function M:wake_waiters()
+  for _, process in pairs(self.world.processes) do
+    local request = process.wait_request
+    if process.state == "blocked" and request and request.kind == "wait4" then
+      local exited
+      for _, child in pairs(self.world.processes) do
+        if child.state == "exited" and child_matches(process, child, request.requested) then exited = child; break end
+      end
+      if exited then
+        result(request.cpu, process:reap_child(exited, request.status))
+        process.wait_request, process.state = nil, "runnable"
+      end
+    end
+  end
+end
+
+function M:exit_process(code, signal_number)
+  if self.state == "exited" then return end
+  local descriptors = {}
+  for fd in pairs(self.fds) do descriptors[#descriptors + 1] = fd end
+  for _, fd in ipairs(descriptors) do self:close(fd) end
+  self.exited, self.exit_code, self.term_signal_number = true, code, signal_number
+  self.state = "exited"
+  if self.cpu then self.cpu.halted = true end
+  self:wake_waiters()
+end
+
+function M:create_pipe(address)
+  local first = self:allocate_fd(0)
+  if not first then return nil, "EMFILE" end
+  self.fds[first] = { reserved = true }
+  local second = self:allocate_fd(0)
+  self.fds[first] = nil
+  if not second then return nil, "EMFILE" end
+  local pipe = { data = "", readers = 1, writers = 1 }
+  self.fds[first] = { description = { kind = "pipe_read", pipe = pipe, readable = true, refs = 1 } }
+  self.fds[second] = { description = { kind = "pipe_write", pipe = pipe, writable = true, refs = 1 } }
+  self.memory:write_u32(address, first)
+  self.memory:write_u32(address + 4, second)
+  return true
+end
+
+function M:block_pipe_read(cpu, fd, address, count)
+  self.state = "blocked"
+  self.wait_request = { kind = "pipe_read", cpu = cpu, fd = fd, address = address, count = count,
+    pipe = self.fds[fd].description.pipe }
+end
+
+function M:wake_pipe(pipe)
+  for _, process in pairs(self.world.processes) do
+    local request = process.wait_request
+    if process.state == "blocked" and request and request.kind == "pipe_read" and request.pipe == pipe then
+      local data, read_error = process:read_fd(request.fd, request.count)
+      if data ~= nil then
+        process.memory:write(request.address, data)
+        result(request.cpu, #data)
+        process.wait_request, process.state = nil, "runnable"
+      elseif read_error ~= "EAGAIN" then
+        result(request.cpu, -(errno[read_error] or errno.EIO))
+        process.wait_request, process.state = nil, "runnable"
+      end
+    end
+  end
+end
+
+function M:dispatch(cpu, next_rip)
   local nr = cpu.regs[0][1]
   local register_order, args = { 7, 6, 2, 10, 8, 9 }, { 0, 0, 0, 0, 0, 0 }
   for i = 1, syscall_argc[nr] or 0 do args[i] = number(cpu, register_order[i]) end
   local a1, a2, a3, a4, a5, a6 = args[1], args[2], args[3], args[4], args[5], args[6]
   self.syscalls = self.syscalls + 1
+  self.world.syscalls = self.world.syscalls + 1
   if self.trace then self.trace({ number = nr, args = { a1, a2, a3, a4, a5, a6 } }) end
 
   if nr == 1 then -- write
@@ -311,7 +547,10 @@ function M:dispatch(cpu)
     if a3 < 0 or a3 > self.io_limit then result(cpu, -errno.EINVAL)
     else
       local data, read_error = self:read_fd(a1, a3)
-      if data == nil then result(cpu, -(errno[read_error] or errno.EIO))
+      if data == nil and read_error == "EAGAIN" and self.fds[a1]
+          and self.fds[a1].description.kind == "pipe_read" then
+        self:block_pipe_read(cpu, a1, a2, a3)
+      elseif data == nil then result(cpu, -(errno[read_error] or errno.EIO))
       else self.memory:write(a2, data); result(cpu, #data) end
     end
   elseif nr == 2 or nr == 257 then
@@ -381,6 +620,9 @@ function M:dispatch(cpu)
       local info, stat_error = self.vfs:stat(path)
       result(cpu, info and 0 or -(errno[stat_error] or errno.ENOENT))
     end
+  elseif nr == 22 then
+    local ok, pipe_error = self:create_pipe(a1)
+    result(cpu, ok and 0 or -(errno[pipe_error] or errno.EMFILE))
   elseif nr == 32 then
     local fd, duplicate_error = self:duplicate(a1, 0)
     result(cpu, fd or -(errno[duplicate_error] or errno.EBADF))
@@ -418,9 +660,23 @@ function M:dispatch(cpu)
     end
   elseif nr == 39 or nr == 186 then result(cpu, self.pid)
   elseif nr == 107 then result(cpu, 0)
-  elseif nr == 110 then result(cpu, 0)
+  elseif nr == 110 then result(cpu, self.ppid)
+  elseif nr == 57 or nr == 58 then
+    local pid, fork_error = self:fork_process(cpu, next_rip or cpu.rip)
+    result(cpu, pid or -(errno[fork_error] or errno.EAGAIN))
+  elseif nr == 59 then
+    local path = self:cstring(a1)
+    if not path then result(cpu, -errno.EFAULT)
+    else
+      local ok, exec_error = self:execve(cpu, path, a2, a3)
+      if ok then return true end
+      result(cpu, -(errno[exec_error] or errno.ENOEXEC))
+    end
+  elseif nr == 61 then
+    local waited, wait_error = self:wait4(cpu, a1, a2, a3)
+    if waited ~= false then result(cpu, waited or -(errno[wait_error] or errno.ECHILD)) end
   elseif nr == 60 or nr == 231 then
-    self.exited, self.exit_code, cpu.halted = true, bit32.band(a1, 0xff), true; result(cpu, 0)
+    self:exit_process(bit32.band(a1, 0xff)); result(cpu, 0)
   elseif nr == 63 then
     local fields = { "Linux", "craftos", "6.6.0-craftos-blink", "#1", "x86_64", "(none)" }
     for i, value in ipairs(fields) do self.memory:write(a1 + (i - 1) * 65, value .. "\0" .. string.rep("\0", 64 - #value)) end
