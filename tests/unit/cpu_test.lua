@@ -315,6 +315,24 @@ expect_alignment_fault("\15\41\2", 0x8501, "movaps store alignment fault")
 expect_alignment_fault("\102\15\111\2", 0x8501, "movdqa load alignment fault")
 expect_alignment_fault("\102\15\127\2", 0x8501, "movdqa store alignment fault")
 
+-- Syscall handlers receive the architectural return RIP. A handler may report
+-- a control transfer (exec/sigreturn), in which case the CPU keeps its new RIP.
+m:write(0x15a0, "\15\5")
+local syscall_return_rip
+local syscall_cpu = CPU.new(m, { rip = 0x15a0, syscall = function(_, next_rip)
+  syscall_return_rip = next_rip
+end })
+syscall_cpu:step()
+t.eq(syscall_return_rip, 0x15a2, "syscall callback return RIP")
+t.eq(syscall_cpu.rip, 0x15a2, "ordinary syscall resumes after instruction")
+syscall_cpu.rip = 0x15a0
+syscall_cpu.syscall = function(current)
+  current.rip = 0x1600
+  return true
+end
+syscall_cpu:step()
+t.eq(syscall_cpu.rip, 0x1600, "syscall control transfer preserves handler RIP")
+
 local fault = t.raises(function() cpu.rip = 0x1120; m:write8(0x1120, 0xf4); cpu:step() end,
   function(e) return type(e) == "table" and e.signal == "SIGILL" end)
 t.eq(fault.address, 0x1120)

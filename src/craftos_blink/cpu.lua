@@ -599,7 +599,9 @@ function M:step()
     local op2 = r:u8()
     if op2 == 0x05 then
       if not self.syscall then guest_fault(self, "SIGSYS", "SYS_SECCOMP") end
-      self.syscall(self); mnemonic = "syscall"
+      local transferred = self.syscall(self, r.pos)
+      if transferred then r.pos = self.rip end
+      mnemonic = "syscall"
     elseif op2 == 0xa2 then
       local leaf = self.regs[0][1]
       if leaf == 0 then
